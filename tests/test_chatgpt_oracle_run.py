@@ -6417,3 +6417,37 @@ def test_recursive_self_observation_settlement_rejects_generic_blocked_output(tm
             expected_transcript_sha256=runner.STATE.sha256_file(transcript),
         )
     assert exc.value.code == "RECURSIVE_SELF_OBSERVATION_EVIDENCE_REQUIRED"
+
+
+def test_brief_result_cli_flag_applies_to_execute_and_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runner = load_runner()
+    monkeypatch.setattr(runner.EXECUTOR, "make_config", lambda **kwargs: object())
+    full = {"ok": True, "status": "captured", "run_dir": "/r", "result": {
+        "run_id": "brief-run", "status": "captured", "submission": "observed", "capture": "durable",
+        "artifacts": {"output": "/r/output.md", "output_bytes": 5}, "model_check": {"verified": True},
+        "oracle": {"binding": {"conversation_url": "https://chatgpt.com/c/x"}}, "timeline": {"prepared": "t"},
+        "personalization_preflight": {"big": "x" * 500},
+    }}
+    monkeypatch.setattr(runner.EXECUTOR, "execute_config", lambda config, *, dry_run: full)
+    assert runner.main(["execute", "--project-root", "p", "--mission-path", "m", "--brief"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "ok": True, "status": "captured", "phase": "captured", "run_id": "brief-run", "run_dir": "/r",
+        "output": "/r/output.md", "output_bytes": 5, "verified": True,
+        "conversation_url": "https://chatgpt.com/c/x", "error_code": None, "error": None, "next_action": "read output",
+    }
+
+    seen: dict[str, object] = {}
+
+    def reconnect_run(run_dir, *, dry_run, session_id):
+        seen.update({"run_dir": run_dir, "session_id": session_id})
+        return {"ok": True, "status": "dry-run", "run_dir": str(run_dir), "argv": ["oracle"], "resubmit": False}
+
+    monkeypatch.setattr(runner.EXECUTOR, "reconnect_run", reconnect_run)
+    assert runner.main(["reconnect", "--run-dir", "/r", "--dry-run", "--session-id", "claude-owner", "--brief"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert "argv" not in payload and payload["status"] == "dry-run"
+    assert seen["session_id"] == "claude-owner"

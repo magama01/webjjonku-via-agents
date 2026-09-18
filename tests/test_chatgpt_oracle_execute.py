@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -450,7 +451,7 @@ class Process:
     def __init__(self, code: int = 0):
         self.code = code
 
-    def wait(self):
+    def wait(self, timeout=None):
         return self.code
 
 
@@ -1514,3 +1515,223 @@ def test_sol_extended_fallback_log_accepts_high_but_not_extra_high(executor, tmp
     assert executor.observed_model_check(stdout, model="gpt-5.6-sol", effort="extended")["verified"] is True
     stdout.write_text(model_line + "[browser] Thinking time: Extra High (already selected)\n", encoding="utf-8")
     assert executor.observed_model_check(stdout, model="gpt-5.6-sol", effort="extended")["verified"] is False
+
+
+# --- observation budget, session keys, brief results, phases, timeline ---
+
+
+class HungProcess:
+    pid = 4343
+
+    def __init__(self):
+        self.stopped: list[str] = []
+
+    def wait(self, timeout=None):
+        if timeout is not None and not self.stopped:
+            raise subprocess.TimeoutExpired(cmd="oracle", timeout=timeout)
+        return -9
+
+    def terminate(self):
+        self.stopped.append("terminate")
+
+    def kill(self):
+        self.stopped.append("kill")
+
+
+def _run_with(executor, config, popen, **overrides):
+    kwargs = dict(
+        command_resolver=lambda: ["oracle"],
+        version_resolver=lambda command: "oracle 0.20.0",
+        compat_factory=lambda version: {"ok": True},
+        popen_factory=popen,
+        tab_closer=lambda binding: {"status": "closed", "target_id": binding["target_id"]},
+        browser_preflight=fake_preflight,
+        browser_cleanup=fake_cleanup,
+    )
+    kwargs.update(overrides)
+    return executor.execute_config(config, **kwargs)
+
+
+def test_observation_deadline_terminates_hung_oracle(executor, execution_paths, monkeypatch):
+    root, mission, run_root, _ = execution_paths
+    monkeypatch.setenv("CODEX_ORACLE_OBSERVATION_BUDGET_SECONDS", "1")
+    config = executor.make_config(project_root=root, mission_path=mission, run_root=run_root, run_id="hung-run-0001")
+    seed_run_project(executor, config)
+    hung = HungProcess()
+    result = _run_with(executor, config, lambda argv, **kwargs: hung)
+    state = json.loads((Path(result["run_dir"]) / "state.json").read_text(encoding="utf-8"))
+    assert result["ok"] is False
+    assert hung.stopped[0] == "terminate"
+    assert state["status"] == "attention_required"
+    assert state["error_code"] == "OBSERVATION_TIMEOUT"
+    assert state["failure_stage"] == "observation-timeout"
+    assert state["phase"] == "submission_unknown"
+    assert state["observation"]["budget_seconds"] == 1.0
+
+
+def test_reconnect_budget_persists_deadline_and_refuses_when_exhausted(executor, execution_paths):
+    root, mission, run_root, session_root = execution_paths
+    config = executor.make_config(project_root=root, mission_path=mission, run_root=run_root, run_id="budget-run-0001")
+
+    def initial_popen(argv, **kwargs):
+        write_session_meta(session_root, argv[argv.index("--slug") + 1], status="running", port=browser_port(argv))
+        return Process(1)
+
+    first = _run_with(executor, config, initial_popen)
+    run_dir = Path(first["run_dir"])
+    state_path = run_dir / "state.json"
+    deadline = json.loads(state_path.read_text(encoding="utf-8"))["observation"]["deadline"]
+
+    def reconnect_popen(argv, **kwargs):
+        return Process(1)
+
+    for expected in (1, 2):
+        executor.reconnect_run(run_dir, popen_factory=reconnect_popen, browser_cleanup=fake_cleanup)
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["observation"]["reconnects"] == expected
+        assert state["observation"]["deadline"] == deadline
+    refused = executor.reconnect_run(run_dir, popen_factory=lambda *a, **k: pytest.fail("no third observer"), browser_cleanup=fake_cleanup)
+    assert refused["ok"] is False
+    assert refused["result"]["error_code"] == "OBSERVATION_RECONNECTS_EXHAUSTED"
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["observation"].update({"reconnects": 0, "deadline": "2000-01-01T00:00:00+00:00"})
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    expired = executor.reconnect_run(run_dir, popen_factory=lambda *a, **k: pytest.fail("deadline passed"), browser_cleanup=fake_cleanup)
+    assert expired["result"]["error_code"] == "OBSERVATION_DEADLINE_PASSED"
+
+
+def test_project_key_hash_is_collision_free_and_reads_legacy_entries(executor, execution_paths):
+    root, mission, run_root, _ = execution_paths
+    long_a = "claude-" + "x" * 80 + "-alpha"
+    long_b = "claude-" + "x" * 80 + "-beta"
+    keys = set()
+    for sid in (long_a, long_b, "a.b_c", "a-b-c", "codex-" + "9" * 90):
+        config = executor.make_config(project_root=root, mission_path=mission, run_root=run_root, session_id=sid)
+        key = executor._workspace_project_key(config)
+        assert executor.RUN_ID_RE.fullmatch(key)
+        keys.add(key)
+    assert len(keys) == 5
+
+    legacy_config = executor.make_config(project_root=root, mission_path=mission, run_root=run_root, session_id="legacy-session")
+    legacy_key = executor._legacy_workspace_project_key(legacy_config)
+    assert legacy_key != executor._workspace_project_key(legacy_config)
+    payload = {
+        "schema": executor.WORKSPACE_PROJECT_MAP_SCHEMA,
+        "projects": {legacy_key: {
+            "key": legacy_key, "run_id": "old-run-000001", "session_id": "legacy-session",
+            "workspace_root": str(root), "name": root.name,
+            "url": "https://chatgpt.com/g/g-p-legacy0001/project",
+        }},
+    }
+    mapped = executor._mapped_workspace_project(legacy_config, payload)
+    assert mapped == {"name": root.name, "url": "https://chatgpt.com/g/g-p-legacy0001/project"}
+    other = executor.make_config(project_root=root, mission_path=mission, run_root=run_root, session_id="legacy-session-2")
+    assert executor._mapped_workspace_project(other, payload) is None
+
+
+def test_foreign_session_reconnect_is_rejected_and_owner_accepted(executor, execution_paths, monkeypatch):
+    root, mission, run_root, session_root = execution_paths
+    config = executor.make_config(project_root=root, mission_path=mission, run_root=run_root, run_id="owned-run-0001", session_id="claude-owner")
+    seed_run_project(executor, config)
+
+    def initial_popen(argv, **kwargs):
+        write_session_meta(session_root, argv[argv.index("--slug") + 1], status="running", port=browser_port(argv))
+        return Process(1)
+
+    run_dir = Path(_run_with(executor, config, initial_popen)["run_dir"])
+    for env in ("WEBJJONKU_SESSION_ID", "CODEX_SESSION_ID", "CLAUDE_SESSION_ID"):
+        monkeypatch.delenv(env, raising=False)
+    with pytest.raises(executor.ExecutionError) as anonymous:
+        executor.reconnect_run(run_dir, dry_run=True)
+    assert anonymous.value.code == "FOREIGN_SESSION_RUN"
+    with pytest.raises(executor.ExecutionError) as foreign:
+        executor.reconnect_run(run_dir, dry_run=True, session_id="claude-intruder")
+    assert foreign.value.code == "FOREIGN_SESSION_RUN"
+    assert executor.reconnect_run(run_dir, dry_run=True, session_id="claude-owner")["resubmit"] is False
+
+
+def test_brief_result_shapes(executor, execution_paths):
+    root, mission, run_root, session_root = execution_paths
+    config = executor.make_config(project_root=root, mission_path=mission, run_root=run_root, run_id="brief-run-0001", session_id="claude-brief")
+    seed_run_project(executor, config)
+    preview = executor.brief_result(executor.execute_config(config, dry_run=True))
+    assert preview == {
+        "ok": True, "status": "dry-run", "run_dir": str(run_root / config.run_id), "resubmit": False,
+        "workspace_project": {"mapped": True, "url": "https://chatgpt.com/g/g-p-workspace123/project", "bootstrap_required": False},
+    }
+
+    def popen(argv, **kwargs):
+        Path(argv[argv.index("--write-output") + 1]).write_text("answer\n", encoding="utf-8")
+        kwargs["stdout"].write(_sol_native_evidence("extended", "High").encode())
+        kwargs["stdout"].flush()
+        write_session_meta(session_root, argv[argv.index("--slug") + 1], status="completed", port=browser_port(argv))
+        return Process(0)
+
+    captured = executor.brief_result(_run_with(executor, config, popen))
+    assert set(captured) == {"ok", "status", "phase", "run_id", "run_dir", "output", "output_bytes", "verified",
+                             "conversation_url", "error_code", "error", "next_action"}
+    assert captured["phase"] == "captured" and captured["verified"] is True and captured["next_action"] == "read output"
+    assert captured["output"].endswith("output.md") and captured["output_bytes"] == 7
+
+    failed = executor.brief_result({"ok": False, "status": "attention_required", "run_dir": "/r", "result": {
+        "run_id": "x", "status": "attention_required", "submission": "unknown", "capture": "absent",
+        "observation": {"reconnects": 0, "max_reconnects": 2, "deadline": "2999-01-01T00:00:00+00:00"},
+    }})
+    assert failed["phase"] == "submission_unknown" and failed["next_action"] == "reconnect --run-dir /r" and failed["output"] is None
+    spent = executor.brief_result({"ok": False, "status": "attention_required", "run_dir": "/r", "result": {
+        "status": "attention_required", "submission": "observed", "capture": "absent",
+        "observation": {"reconnects": 2, "max_reconnects": 2, "deadline": "2999-01-01T00:00:00+00:00"},
+    }})
+    assert spent["phase"] == "awaiting_response" and spent["next_action"].startswith("observation budget exhausted")
+
+
+def test_run_phase_classification(executor, execution_paths):
+    phase = executor._phase_for
+    assert phase({"status": "captured"}) == "captured"
+    assert phase({"status": "attention_required", "submission": "not_observed"}) == "failed_before_submit"
+    assert phase({"status": "attention_required", "submission": "unknown"}) == "submission_unknown"
+    assert phase({"status": "attention_required", "submission": "observed", "capture": "absent"}) == "awaiting_response"
+    assert phase({"status": "attention_required", "submission": "observed", "capture": "durable"}) == "saved_unverified"
+    root, mission, run_root, session_root = execution_paths
+    config = executor.make_config(project_root=root, mission_path=mission, run_root=run_root, run_id="empty-run-0001")
+    seed_run_project(executor, config)
+
+    def popen(argv, **kwargs):
+        Path(argv[argv.index("--write-output") + 1]).write_text("   \n", encoding="utf-8")
+        kwargs["stdout"].write(_sol_native_evidence("extended", "High").encode())
+        kwargs["stdout"].flush()
+        write_session_meta(session_root, argv[argv.index("--slug") + 1], status="completed", port=browser_port(argv))
+        return Process(0)
+
+    result = _run_with(executor, config, popen)
+    assert result["status"] == "attention_required"
+    assert result["result"]["capture"] == "absent"
+    assert result["result"]["phase"] == "awaiting_response"
+
+
+def test_timeline_stamps_after_execute_and_reconnect(executor, execution_paths):
+    root, mission, run_root, session_root = execution_paths
+    config = executor.make_config(project_root=root, mission_path=mission, run_root=run_root, run_id="timeline-run-01")
+    seed_run_project(executor, config)
+
+    def initial_popen(argv, **kwargs):
+        write_session_meta(session_root, argv[argv.index("--slug") + 1], status="running", port=browser_port(argv))
+        return Process(1)
+
+    first = _run_with(executor, config, initial_popen)
+    timeline = first["result"]["timeline"]
+    assert list(timeline) == ["prepared", "browser_ready", "launched", "exited", "finalized"]
+    assert all(value.endswith("+00:00") for value in timeline.values())
+    run_dir = Path(first["run_dir"])
+
+    def reconnect_popen(argv, **kwargs):
+        Path(first["result"]["artifacts"]["output"]).write_text("done\n", encoding="utf-8")
+        write_session_meta(session_root, first["result"]["oracle"]["slug"], status="completed",
+                           port=int(first["result"]["oracle"]["expected_cdp_port"]))
+        return Process(0)
+
+    second = executor.reconnect_run(run_dir, popen_factory=reconnect_popen, browser_cleanup=fake_cleanup)
+    timeline = second["result"]["timeline"]
+    assert "reconnect_1_launched" in timeline and "reconnect_1_exited" in timeline
+    assert second["result"]["observation"]["reconnects"] == 1
