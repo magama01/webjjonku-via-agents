@@ -331,6 +331,9 @@ CURRENT_PATCHES = {
         "patch": "thinkingTime.direct-slider-account-maximum.patch",
         "pristine": "15371da2aa8c52811605ac7406e7e0f7a3286c94324bb69933c69f94fdf5e93f",
         "patched": "108558a2c2d64be66e47b0f1feb9cd3a9c96d75995daf95b61f95015bc709127",
+        # Installs patched before the three-tier Sol slider fix migrate in place.
+        "legacy_patched": ["cd3f7b5fab388e5cb0fe13ea3358c34a6aef1fdb032f4a4bd445f833f3390bf3"],
+        "legacy_patch": "thinkingTime.direct-slider-account-maximum.four-five-tier.patch",
     },
 }
 

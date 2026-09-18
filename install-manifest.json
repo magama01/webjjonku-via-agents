@@ -37,6 +37,7 @@
     "bin/chatgpt_oracle_compat.py",
     "bin/oracle-compat/0.20.0/modelSelection.korean-latest-label.patch",
     "bin/oracle-compat/0.20.0/thinkingTime.direct-slider-account-maximum.patch",
+    "bin/oracle-compat/0.20.0/thinkingTime.direct-slider-account-maximum.four-five-tier.patch",
     "bin/oracle-compat/0.17.1/assistantResponse.terminal-marker-fallback.patch",
     "bin/oracle-compat/0.17.1/assistantResponse.terminal-marker-fallback.v1.19.6.patch",
     "bin/oracle-compat/0.17.1/assistantResponse.terminal-marker-fallback.v1.19.2.patch",
