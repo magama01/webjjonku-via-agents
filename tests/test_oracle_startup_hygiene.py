@@ -670,3 +670,34 @@ console.log('PASS');
     assert changed['session'] == {'restore_on_startup': 5, 'startup_urls': []}
     assert changed['unrelated'] == original['unrelated']
     assert (copied / 'Default/Cookies').read_bytes() == b'opaque-cookie-fixture'
+
+
+def test_owned_browser_launch_restores_previous_frontmost_app() -> None:
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node unavailable')
+    module = (ROOT / 'bin/oracle_temporary_personalization_preflight.mjs').as_uri()
+    script = r"""
+import assert from 'node:assert/strict';
+const {startPersonalizedBrowser} = await import(MODULE);
+const url='https://chatgpt.com/?temporary-chat=true';
+const pages=[{id:'owned',type:'page',url}];
+let front='Orca'; const activated=[];
+const client={Page:{enable:async()=>{}},Runtime:{enable:async()=>{},evaluate:async()=>({result:{value:url}})},
+ close:async()=>{},Emulation:{setFocusEmulationEnabled:async()=>{}}};
+class Launcher { constructor(){this.port=12345;this.pid=321;} async launch(){front='Google Chrome';} kill(){} }
+const deps={Launcher,pause:async()=>{},
+ jsonAt:async(port,resource)=>resource==='list'?pages:{webSocketDebuggerUrl:'ws://127.0.0.1:12345/devtools/browser/exact'},
+ lifecycle:{buildChromeFlagsForTest:()=>[],resolveChromeLaunchOptionsForTest:flags=>({chromeFlags:flags,ignoreDefaultFlags:true}),
+ positionChromeWindowOffscreen:async()=>{},
+ connectToRemoteChromeTarget:async()=>({client,targetId:'owned'}),
+ closeBlankChromeTabs:async()=>{}},
+ ensurePromptReady:async()=>{}, ensureChatMode:async()=>{}, ensureTemporaryChatPersonalization:async()=>{},
+ frontmostApp:async()=>front, activateApp:async(name)=>{activated.push(name);front=name;return true;}};
+await startPersonalizedBrowser({port:12345,url,profilePath:'owned-copy',startupTimeoutMs:1000,platform:'darwin'},deps);
+assert.deepEqual(activated,['Orca']);
+assert.equal(front,'Orca');
+"""
+    script = script.replace('MODULE', json.dumps(module))
+    completed = subprocess.run([node, '--input-type=module', '-e', script], capture_output=True, text=True, timeout=60)
+    assert completed.returncode == 0, completed.stderr

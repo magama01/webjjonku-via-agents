@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import subprocess
+import time
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -1736,3 +1737,44 @@ def test_timeline_stamps_after_execute_and_reconnect(executor, execution_paths):
     timeline = second["result"]["timeline"]
     assert "reconnect_1_launched" in timeline and "reconnect_1_exited" in timeline
     assert second["result"]["observation"]["reconnects"] == 1
+
+
+def test_child_environment_skips_bring_to_front_on_macos(executor, monkeypatch):
+    monkeypatch.delenv("ORACLE_SKIP_BRING_TO_FRONT", raising=False)
+    monkeypatch.setattr(executor.sys, "platform", "darwin")
+    assert executor._child_environment()["ORACLE_SKIP_BRING_TO_FRONT"] == "1"
+    monkeypatch.setattr(executor.sys, "platform", "win32")
+    assert "ORACLE_SKIP_BRING_TO_FRONT" not in executor._child_environment()
+    monkeypatch.setattr(executor.sys, "platform", "darwin")
+    monkeypatch.setenv("ORACLE_SKIP_BRING_TO_FRONT", "0")
+    assert executor._child_environment()["ORACLE_SKIP_BRING_TO_FRONT"] == "0"
+
+
+def test_focus_guard_returns_focus_when_owned_browser_steals_it(executor):
+    samples = iter([(100, "Orca"), (100, "Orca"), (555, "ego lite"), (100, "Orca"), (200, "Slack"), (555, "ego lite")])
+    activated: list[int] = []
+
+    def frontmost():
+        try:
+            return next(samples)
+        except StopIteration:
+            return None
+
+    with executor._FocusGuard(555, interval=0.01, frontmost=frontmost, activate=activated.append, enabled=True) as guard:
+        time.sleep(0.3)
+    assert activated == [100, 200]
+    assert guard.restores == 2
+
+
+def test_focus_guard_is_inert_without_owned_pid_or_when_disabled(executor, monkeypatch):
+    calls: list[str] = []
+    with executor._FocusGuard(None, frontmost=lambda: calls.append("polled") or None, enabled=True):
+        time.sleep(0.05)
+    assert calls == []
+    monkeypatch.setenv("WEBJJONKU_FOCUS_GUARD", "0")
+    monkeypatch.setattr(executor.sys, "platform", "darwin")
+    assert executor._FocusGuard(555).enabled is False
+    monkeypatch.delenv("WEBJJONKU_FOCUS_GUARD")
+    assert executor._FocusGuard(555).enabled is True
+    monkeypatch.setattr(executor.sys, "platform", "win32")
+    assert executor._FocusGuard(555).enabled is False
