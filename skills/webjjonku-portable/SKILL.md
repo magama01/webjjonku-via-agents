@@ -10,12 +10,12 @@ description: 셸을 호출할 수 있는 에이전트에서 웹쫀쿠 Oracle 실
 
 ## 실행기
 
-저장소 기본 경로:
+설치된 실행기를 사용함. `install.py`가 `${CODEX_HOME:-$HOME/.codex}` 아래에 배포함:
 
-`/Users/officener/dev/jjonku/codex-web-gpt-automation`
+`${CODEX_HOME:-$HOME/.codex}/bin/chatgpt_oracle_run.py`
 
-실행기는 `bin/chatgpt_oracle_run.py`임. `CODEX_HOME`에 설치된 실행기가 있으면
-그 복사본을 사용해도 되지만, 설치 여부가 불확실하면 저장소 경로를 직접 사용함.
+설치본이 없으면 먼저 저장소에서 `python3 install.py`를 실행함. 저장소 체크아웃의
+`bin/`을 직접 가리키지 않음 — 호출 위치에 따라 동작이 달라짐.
 
 ## 새 작업
 
@@ -25,7 +25,7 @@ description: 셸을 호출할 수 있는 에이전트에서 웹쫀쿠 Oracle 실
    `--dry-run`을 제거하고 실행함.
 
 ```bash
-python3 /Users/officener/dev/jjonku/codex-web-gpt-automation/bin/chatgpt_oracle_run.py \
+python3 "${CODEX_HOME:-$HOME/.codex}"/bin/chatgpt_oracle_run.py \
   execute \
   --project-root "/absolute/project/root" \
   --mission-path "/absolute/project/root/.codex-tmp/web-mission.md" \
@@ -50,7 +50,7 @@ python3 /Users/officener/dev/jjonku/codex-web-gpt-automation/bin/chatgpt_oracle_
 응답 대기 중 연결이 끊기면 새 실행을 시작하지 않고 기존 run 디렉터리를 지정함.
 
 ```bash
-python3 /Users/officener/dev/jjonku/codex-web-gpt-automation/bin/chatgpt_oracle_run.py \
+python3 "${CODEX_HOME:-$HOME/.codex}"/bin/chatgpt_oracle_run.py \
   reconnect \
   --run-dir "/absolute/run/directory" \
   --dry-run

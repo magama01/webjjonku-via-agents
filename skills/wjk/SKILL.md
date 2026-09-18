@@ -6,7 +6,7 @@ description: /wjk <요청> — 요청을 웹쫀쿠(ChatGPT 웹 Oracle) 미션으
 # /wjk
 
 `$ARGUMENTS`를 웹쫀쿠 미션으로 실행함. 공통 계약을 먼저 읽음:
-`/Users/officener/dev/jjonku/codex-web-gpt-automation/skills/webjjonku-portable/SKILL.md`
+`${CODEX_HOME:-$HOME/.codex}/skills/webjjonku-portable/SKILL.md`
 
 `$ARGUMENTS`가 비어 있으면 무엇을 위임할지 사용자에게 묻고 멈춤.
 
@@ -18,7 +18,7 @@ description: /wjk <요청> — 요청을 웹쫀쿠(ChatGPT 웹 Oracle) 미션으
 2. 세션 ID는 `$WEBJJONKU_SESSION_ID` (SessionStart 훅이 설정). 비어 있으면 사용자에게 알리고 `--session-id` 없이 단발 실행함.
 3. dry-run 검증:
    ```bash
-   python3 /Users/officener/dev/jjonku/codex-web-gpt-automation/bin/chatgpt_oracle_run.py \
+   python3 "${CODEX_HOME:-$HOME/.codex}"/bin/chatgpt_oracle_run.py \
      execute \
      --project-root "<project-root>" \
      --mission-path "<project-root>/.codex-tmp/web-mission.md" \

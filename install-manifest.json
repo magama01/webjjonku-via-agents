@@ -131,6 +131,8 @@
     "skills/chatgpt-deep-research-browser/scripts/run_chatgpt_deep_research.py",
     "skills/chatgpt-deep-research-browser/scripts/run_deep_research_browser.py",
     "skills/chatgpt-oracle-runtime/SKILL.md",
+    "skills/webjjonku-portable/SKILL.md",
+    "skills/wjk/SKILL.md",
     "skills/chatgpt-oracle-runtime/agents/openai.yaml",
     "skills/chatgpt-oracle-runtime/scripts/run_chatgpt_oracle.py",
     "skills/chatgpt-workspace-setup/SKILL.md",
