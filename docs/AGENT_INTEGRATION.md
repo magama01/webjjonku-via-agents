@@ -16,6 +16,34 @@ cp /Users/officener/dev/jjonku/codex-web-gpt-automation/skills/webjjonku-portabl
 Claude에게는 `웹쫀쿠로 분석해줘`처럼 요청하면 됨. 스킬은 미션 파일 작성 후
 `bin/chatgpt_oracle_run.py execute`를 호출하도록 안내함.
 
+### `/wjk` 슬래시 명령
+
+`/wjk <요청>` 한 번으로 미션 작성·실행·회수까지 맡기려면 `skills/wjk`를 추가로 복사함.
+
+```bash
+mkdir -p "$HOME/.claude/skills/wjk"
+cp /Users/officener/dev/jjonku/codex-web-gpt-automation/skills/wjk/SKILL.md \
+  "$HOME/.claude/skills/wjk/SKILL.md"
+```
+
+세션당 Project 재사용에는 세션 ID가 필요함. Claude Code는 Bash 환경에 세션 ID를
+넘기지 않으므로 `~/.claude/settings.json`의 `hooks.SessionStart`에 다음을 추가함.
+훅이 `CLAUDE_ENV_FILE`에 `WEBJJONKU_SESSION_ID=claude-<session_id>`를 기록하고
+이후 모든 Bash 호출에서 그 값을 사용함.
+
+```json
+{
+  "hooks": [
+    {
+      "type": "command",
+      "command": "[ -n \"${CLAUDE_ENV_FILE-}\" ] && jq -r '\"export WEBJJONKU_SESSION_ID=claude-\" + .session_id' >> \"$CLAUDE_ENV_FILE\"; exit 0"
+    }
+  ]
+}
+```
+
+새 세션부터 적용됨. 현재 세션에서는 `WEBJJONKU_SESSION_ID`가 비어 있으므로 단발 실행으로 동작함.
+
 ## agy 및 기타 에이전트
 
 고정된 스킬 디렉터리 규약이 없는 에이전트는 다음 파일을 프로젝트 지시 또는
