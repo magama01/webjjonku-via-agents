@@ -33,11 +33,13 @@ BIN = Path(__file__).resolve().parent
 MANIFEST_SCHEMA = "codex.chatgpt.oracle-execution/v1"
 STATE_SCHEMA = "codex.chatgpt.oracle-execution-state/v1"
 CHATGPT_URL = "https://chatgpt.com/?temporary-chat=true"
+CHATGPT_HOME_URL = "https://chatgpt.com/"
+WORKSPACE_PROJECT_MAP_SCHEMA = "codex.chatgpt.workspace-project-map/v1"
 DEFAULT_APP_NAME = "codex"
 DEFAULT_MODEL = "latest"
 DEFAULT_EFFORT = "pro"
 SUPPORTED_MODELS = ("latest", "gpt-5.6-sol")
-SUPPORTED_EFFORTS = ("pro", "extra-high")
+SUPPORTED_EFFORTS = ("pro", "extra-high", "extended")
 ORACLE_EXPLICIT_STRATEGY = "select"
 TERMINAL_ORACLE_STATES = frozenset({"complete", "completed", "done", "finished"})
 UNRESOLVED_STATUSES = frozenset({"prepared", "running", "attention_required"})
@@ -58,6 +60,7 @@ ALLOWED_MANIFEST_FIELDS = frozenset(
         "run_root",
         "run_id",
         "source_thread_id",
+        "session_id",
         "model",
         "effort",
         "app_name",
@@ -89,6 +92,22 @@ class ExecutionError(RuntimeError):
         return {"ok": False, "error": {"code": self.code, "message": str(self), "evidence": self.evidence}}
 
 
+SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,95}$")
+
+
+def _resolve_session_id(explicit_session_id: str | None = None) -> str | None:
+    if explicit_session_id is None or not str(explicit_session_id).strip():
+        return None
+    raw = str(explicit_session_id).strip()
+    if SESSION_ID_RE.fullmatch(raw) is None:
+        raise ExecutionError(
+            "SESSION_ID_INVALID",
+            "session_id must be a safe 3-96 character identifier starting with an alphanumeric character and containing only [A-Za-z0-9._-]",
+            {"session_id": raw},
+        )
+    return raw
+
+
 @dataclass(frozen=True)
 class ExecutionConfig:
     project_root: Path
@@ -101,6 +120,7 @@ class ExecutionConfig:
     effort: str
     app_name: str
     copy_profile: Path
+    session_id: str | None = None
 
 
 def _absolute_path(value: str | Path | None, *, label: str, must_exist: bool) -> Path:
@@ -152,6 +172,176 @@ def _default_run_root(project_root: Path) -> Path:
     return base / "ordinary" / "projects" / key / "runs"
 
 
+def _workspace_project_map_path(config: ExecutionConfig) -> Path:
+    override = str(os.environ.get("CODEX_ORACLE_PROJECT_MAP_PATH") or "").strip()
+    path = (
+        Path(override).expanduser().resolve(strict=False)
+        if override
+        else (Path(os.environ.get("CODEX_ORACLE_STATE_ROOT") or (Path.home() / ".codex" / "state" / "chatgpt-oracle")).expanduser().resolve()
+              / "workspace-projects.json")
+    )
+    if _is_within(config.project_root, path) or _is_within(path, config.project_root):
+        raise ExecutionError(
+            "WORKSPACE_PROJECT_MAP_OVERLAPS_PROJECT",
+            "workspace Project mapping state must be outside the approved project root",
+            {"path": str(path)},
+        )
+    return path
+
+
+def _workspace_project_name(config: ExecutionConfig) -> str:
+    name = config.project_root.name.strip()
+    if not name:
+        raise ExecutionError("WORKSPACE_PROJECT_NAME_INVALID", "project_root basename cannot be used as a ChatGPT Project name")
+    return name
+
+
+def _workspace_project_instructions(config: ExecutionConfig) -> str:
+    return (
+        f"Workspace 경로: {config.project_root}\n\n"
+        "규칙:\n"
+        "- 모든 응답은 한국어로 작성한다.\n"
+        "- 작업을 시작하기 전에 이 workspace에 적용되는 AGENTS.md를 최우선으로 찾아 끝까지 읽고 따른다.\n"
+        "- 파일·코드 작업은 승인된 workspace에서 DevSpace를 우선 사용한다.\n"
+        "- 다른 workspace나 승인되지 않은 root로 대체하지 않는다.\n"
+    )
+
+
+def _normalize_project_url(value: Any) -> str:
+    raw = str(value or "").strip()
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+    except ValueError as exc:
+        raise ExecutionError("WORKSPACE_PROJECT_URL_INVALID", "stored ChatGPT Project URL is invalid") from exc
+    if parsed.scheme != "https" or parsed.netloc != "chatgpt.com":
+        raise ExecutionError("WORKSPACE_PROJECT_URL_INVALID", "ChatGPT Project URL must use https://chatgpt.com")
+    path = parsed.path.rstrip("/")
+    if not re.fullmatch(r"/g/g-p-[A-Za-z0-9_-]+/project", path):
+        raise ExecutionError(
+            "WORKSPACE_PROJECT_URL_INVALID",
+            "ChatGPT Project URL has an unexpected shape",
+            {"url": raw},
+        )
+    return urllib.parse.urlunsplit(("https", "chatgpt.com", path, "", ""))
+
+
+def _workspace_project_chat_url(project_url: str) -> str:
+    # Workspace Projects intentionally use their normal Project composer.  Do
+    # not append temporary-chat=true: that would move the run out of the
+    # Project scope instead of applying the Project instructions.
+    return _normalize_project_url(project_url)
+
+
+def _is_exact_workspace_project_url(value: Any) -> bool:
+    try:
+        return _normalize_project_url(value) == str(value or "").strip()
+    except ExecutionError:
+        return False
+
+
+def _is_chatgpt_session_url(value: Any) -> bool:
+    try:
+        parsed = urllib.parse.urlsplit(str(value or "").strip())
+    except ValueError:
+        return False
+    return parsed.scheme == "https" and parsed.netloc == "chatgpt.com" and bool(parsed.path)
+
+
+def _workspace_project_key(config: ExecutionConfig) -> str:
+    if config.session_id:
+        normalized = re.sub(r"[^A-Za-z0-9._-]", "-", config.session_id.strip())
+        root_key = hashlib.sha256(str(config.project_root).casefold().encode("utf-8")).hexdigest()[:12]
+        key = f"sess-{normalized[:70]}-{root_key}"[:95]
+        if RUN_ID_RE.fullmatch(key):
+            return key
+        return f"sess-{hashlib.sha256(config.session_id.encode('utf-8')).hexdigest()[:12]}-{root_key}"
+    return config.run_id
+
+
+def _load_workspace_project_map(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"schema": WORKSPACE_PROJECT_MAP_SCHEMA, "projects": {}}
+    if path.is_symlink() or not path.is_file():
+        raise ExecutionError("WORKSPACE_PROJECT_MAP_INVALID", "workspace Project mapping state is unsafe", {"path": str(path)})
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="strict"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ExecutionError("WORKSPACE_PROJECT_MAP_INVALID", "workspace Project mapping state is unreadable", {"path": str(path)}) from exc
+    if not isinstance(payload, dict) or payload.get("schema") != WORKSPACE_PROJECT_MAP_SCHEMA or not isinstance(payload.get("projects"), dict):
+        raise ExecutionError("WORKSPACE_PROJECT_MAP_INVALID", "workspace Project mapping state has an unexpected schema", {"path": str(path)})
+    for key, entry in payload["projects"].items():
+        if not isinstance(key, str) or not isinstance(entry, dict):
+            raise ExecutionError("WORKSPACE_PROJECT_MAP_INVALID", "workspace Project mapping entry is invalid", {"path": str(path)})
+        if not isinstance(entry.get("name"), str):
+            raise ExecutionError("WORKSPACE_PROJECT_MAP_INVALID", "workspace Project mapping name is invalid", {"path": str(path)})
+        _normalize_project_url(entry.get("url"))
+        # Historical v1 entries were keyed by absolute workspace path and only
+        # stored name/url. Keep accepting and preserving them, but never use
+        # them for a new execution session.
+        if Path(key).is_absolute():
+            continue
+        if RUN_ID_RE.fullmatch(key) is None:
+            raise ExecutionError("WORKSPACE_PROJECT_MAP_INVALID", "workspace Project mapping key is invalid", {"path": str(path)})
+        entry_key = str(entry.get("key") or entry.get("run_id") or "")
+        if entry_key != key:
+            raise ExecutionError("WORKSPACE_PROJECT_MAP_INVALID", "workspace Project run_id does not match its mapping key", {"path": str(path)})
+        workspace_root = str(entry.get("workspace_root") or "")
+        if not workspace_root or not Path(workspace_root).is_absolute():
+            raise ExecutionError("WORKSPACE_PROJECT_MAP_INVALID", "workspace Project mapping workspace_root is invalid", {"path": str(path)})
+    return payload
+
+
+def _mapped_workspace_project(config: ExecutionConfig, payload: Mapping[str, Any]) -> dict[str, str] | None:
+    key = _workspace_project_key(config)
+    entry = (payload.get("projects") or {}).get(key)
+    if entry is None:
+        return None
+    if not isinstance(entry, Mapping):
+        raise ExecutionError("WORKSPACE_PROJECT_MAP_INVALID", "workspace Project mapping entry is invalid")
+    entry_key = str(entry.get("key") or entry.get("run_id") or "")
+    if entry_key != key:
+        raise ExecutionError("WORKSPACE_PROJECT_MAP_INVALID", "stored ChatGPT Project run_id does not match the current execution")
+    if config.session_id:
+        if str(entry.get("session_id") or "") != config.session_id:
+            raise ExecutionError("WORKSPACE_PROJECT_MAP_INVALID", "stored ChatGPT Project session_id does not match the current execution")
+    else:
+        if str(entry.get("run_id") or "") != config.run_id:
+            raise ExecutionError("WORKSPACE_PROJECT_MAP_INVALID", "stored ChatGPT Project run_id does not match the current execution")
+    if str(entry.get("workspace_root") or "") != str(config.project_root):
+        raise ExecutionError(
+            "WORKSPACE_PROJECT_MAP_ROOT_MISMATCH",
+            "stored ChatGPT Project workspace does not match the current execution",
+            {"expected": str(config.project_root), "actual": entry.get("workspace_root")},
+        )
+    expected_name = _workspace_project_name(config)
+    if str(entry.get("name") or "") != expected_name:
+        raise ExecutionError(
+            "WORKSPACE_PROJECT_MAP_NAME_MISMATCH",
+            "stored ChatGPT Project name does not match the current workspace basename",
+            {"expected": expected_name, "actual": entry.get("name")},
+        )
+    return {"name": expected_name, "url": _normalize_project_url(entry.get("url"))}
+
+
+def _write_workspace_project_mapping(config: ExecutionConfig, path: Path, payload: dict[str, Any], *, url: str) -> dict[str, str]:
+    name = _workspace_project_name(config)
+    normalized_url = _normalize_project_url(url)
+    key = _workspace_project_key(config)
+    projects = dict(payload.get("projects") or {})
+    entry: dict[str, Any] = {
+        "run_id": config.run_id,
+        "workspace_root": str(config.project_root),
+        "name": name,
+        "url": normalized_url,
+    }
+    if config.session_id:
+        entry["session_id"] = config.session_id
+        entry["key"] = key
+    projects[key] = entry
+    _write_json_atomic(path, {"schema": WORKSPACE_PROJECT_MAP_SCHEMA, "projects": projects})
+    return {"name": name, "url": normalized_url}
+
+
 def make_config(
     *,
     project_root: str | Path,
@@ -159,6 +349,7 @@ def make_config(
     run_root: str | Path | None = None,
     run_id: str | None = None,
     source_thread_id: str | None = None,
+    session_id: str | None = None,
     model: str = DEFAULT_MODEL,
     effort: str = DEFAULT_EFFORT,
     app_name: str = DEFAULT_APP_NAME,
@@ -184,6 +375,7 @@ def make_config(
     actual_run_id = str(run_id or f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:12]}").strip()
     if RUN_ID_RE.fullmatch(actual_run_id) is None:
         raise ExecutionError("RUN_ID_INVALID", "run_id must be a safe 8-96 character identifier")
+    actual_session_id = _resolve_session_id(session_id)
     explicit_thread = str(source_thread_id or "").strip().casefold()
     environment_thread = str(os.environ.get("CODEX_THREAD_ID") or "").strip().casefold()
     if explicit_thread and THREAD_ID_RE.fullmatch(explicit_thread) is None:
@@ -217,6 +409,7 @@ def make_config(
         _normalize_effort(effort),
         _normalize_app_name(app_name),
         copy_profile,
+        actual_session_id,
     )
 
 
@@ -235,6 +428,8 @@ def manifest_payload(config: ExecutionConfig) -> dict[str, Any]:
         payload["run_id"] = config.run_id
     if config.source_thread_id:
         payload["source_thread_id"] = config.source_thread_id
+    if config.session_id:
+        payload["session_id"] = config.session_id
     return payload
 
 
@@ -255,6 +450,7 @@ def load_manifest(path: Path) -> ExecutionConfig:
         run_root=payload.get("run_root"),
         run_id=payload.get("run_id"),
         source_thread_id=payload.get("source_thread_id"),
+        session_id=payload.get("session_id"),
         model=payload.get("model", DEFAULT_MODEL),
         effort=payload.get("effort", DEFAULT_EFFORT),
         app_name=payload.get("app_name", DEFAULT_APP_NAME),
@@ -262,7 +458,7 @@ def load_manifest(path: Path) -> ExecutionConfig:
 
 
 def public_contract(config: ExecutionConfig) -> dict[str, Any]:
-    return {
+    contract = {
         "schema": MANIFEST_SCHEMA,
         "project_root": str(config.project_root),
         "mission_path": str(config.mission_path),
@@ -271,10 +467,14 @@ def public_contract(config: ExecutionConfig) -> dict[str, Any]:
         "app_name": config.app_name,
         "oracle_request": {"model": config.model, "model_strategy": _model_strategy(config.model)},
         "chatgpt_url": CHATGPT_URL,
+        "workspace_project": {"name": _workspace_project_name(config), "key": _workspace_project_key(config)},
         "archive": "never",
         "temporary_chat": True,
         "personalization": "enabled-before-submit",
     }
+    if config.session_id:
+        contract["session_id"] = config.session_id
+    return contract
 
 
 def _model_strategy(model: str) -> str:
@@ -286,7 +486,7 @@ def _composer_prompt(config: ExecutionConfig) -> str:
         f"@{config.app_name} Open exactly this approved project root in checkout mode: {config.project_root}. "
         f"Read and execute the mission file: {config.mission_path}. "
         "The mission defines the task intent and action authority; read it and applicable AGENTS.md fully before acting. "
-        "Do not substitute another root or connector, and do not change ChatGPT account, privacy, app, or permission settings. Temporary-chat personalization is enabled by the runner before submission."
+        "Do not substitute another root or connector, and do not change ChatGPT account, privacy, app, or permission settings. The runner establishes the authorized ChatGPT conversation scope before submission."
     )
 
 
@@ -308,6 +508,7 @@ def build_oracle_argv(
     *,
     cdp_port: int | None = None,
     browser_tab: str | None = None,
+    chatgpt_url: str = CHATGPT_URL,
 ) -> list[str]:
     if browser_tab is not None and (
         cdp_port is None or TARGET_ID_RE.fullmatch(browser_tab) is None
@@ -332,7 +533,7 @@ def build_oracle_argv(
         "--model", config.model,
         "--browser-model-strategy", _model_strategy(config.model),
         "--browser-thinking-time", config.effort,
-        "--chatgpt-url", CHATGPT_URL,
+        "--chatgpt-url", chatgpt_url,
         "--browser-archive", "never",
         *browser_args,
         "--browser-timeout", "100m",
@@ -388,6 +589,7 @@ def _initial_state(
         "schema": STATE_SCHEMA,
         "run_id": config.run_id,
         "source_thread_id": config.source_thread_id,
+        "session_id": config.session_id,
         "project_root": str(config.project_root),
         "approved_roots": [str(config.project_root)],
         "mission": {"path": str(config.mission_path), "sha256": config.mission_sha256},
@@ -444,19 +646,23 @@ def _unresolved_duplicate(config: ExecutionConfig) -> dict[str, Any] | None:
         if (
             state.get("project_root") == str(config.project_root)
             and state.get("source_thread_id") == config.source_thread_id
+            and state.get("session_id") == config.session_id
             and state.get("status") in UNRESOLVED_STATUSES
             and state.get("submission") in {"unknown", "observed"}
+            and state.get("capture") != "durable"
         ):
             return {"run_dir": str(state_path.parent), "status": state.get("status"), "submission": state.get("submission")}
     return None
 
 
 @contextmanager
-def _submit_lock(config: ExecutionConfig, timeout_seconds: float = 30.0) -> Iterator[None]:
-    lock_key = hashlib.sha256(
-        (str(config.project_root).casefold() + "\0" + str(config.source_thread_id or "local")).encode("utf-8")
-    ).hexdigest()
-    lock_path = config.run_root / ".locks" / f"{lock_key}.lock"
+def _exclusive_file_lock(
+    lock_path: Path,
+    *,
+    timeout_seconds: float,
+    timeout_code: str,
+    timeout_message: str,
+) -> Iterator[None]:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = lock_path.open("a+b")
     handle.seek(0, os.SEEK_END)
@@ -480,7 +686,7 @@ def _submit_lock(config: ExecutionConfig, timeout_seconds: float = 30.0) -> Iter
                 acquired = True
             except OSError:
                 if time.monotonic() >= deadline:
-                    raise ExecutionError("SUBMIT_LOCK_TIMEOUT", "another execution owns this task/root scope")
+                    raise ExecutionError(timeout_code, timeout_message)
                 time.sleep(0.05)
         yield
     finally:
@@ -495,6 +701,34 @@ def _submit_lock(config: ExecutionConfig, timeout_seconds: float = 30.0) -> Iter
 
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         handle.close()
+
+
+@contextmanager
+def _submit_lock(config: ExecutionConfig, timeout_seconds: float = 30.0) -> Iterator[None]:
+    lock_key = hashlib.sha256(
+        (str(config.project_root).casefold() + "\0" + str(config.source_thread_id or "local")).encode("utf-8")
+    ).hexdigest()
+    lock_path = config.run_root / ".locks" / f"{lock_key}.lock"
+    with _exclusive_file_lock(
+        lock_path,
+        timeout_seconds=timeout_seconds,
+        timeout_code="SUBMIT_LOCK_TIMEOUT",
+        timeout_message="another execution owns this task/root scope",
+    ):
+        yield
+
+
+@contextmanager
+def _workspace_project_lock(config: ExecutionConfig, path: Path, timeout_seconds: float = 120.0) -> Iterator[None]:
+    lock_key = hashlib.sha256(str(config.project_root).casefold().encode("utf-8")).hexdigest()[:24]
+    lock_path = path.parent / ".locks" / f"workspace-project-{lock_key}.lock"
+    with _exclusive_file_lock(
+        lock_path,
+        timeout_seconds=timeout_seconds,
+        timeout_code="WORKSPACE_PROJECT_LOCK_TIMEOUT",
+        timeout_message="another execution is initializing this workspace ChatGPT Project",
+    ):
+        yield
 
 
 @contextmanager
@@ -842,10 +1076,22 @@ def _finalize_capture(
         except (TypeError, ValueError):
             preflight_port = 0
         preflight_target = str(preflight.get("target_id") or "")
+        project_url = str(preflight.get("project_url") or "").strip()
+        workspace_project = state.get("workspace_project")
+        project_binding_invalid = False
+        if project_url:
+            project_binding_invalid = bool(
+                not _is_exact_workspace_project_url(project_url)
+                or not isinstance(workspace_project, Mapping)
+                or str(workspace_project.get("url") or "") != project_url
+                or str(preflight.get("conversation_url") or "") != project_url
+            )
         if binding and (
             binding.get("port") != expected_port
             or binding.get("port") != preflight_port
             or binding.get("target_id") != preflight_target
+            or not _is_chatgpt_session_url(binding.get("conversation_url"))
+            or project_binding_invalid
         ):
             binding = None
     elif binding and binding.get("port") != expected_port:
@@ -860,7 +1106,14 @@ def _finalize_capture(
     else:
         submission = str(state.get("submission") or "unknown")
     oracle_terminal = bool(binding and binding.get("session_status") in TERMINAL_ORACLE_STATES)
+    oracle_completed = bool(binding and binding.get("session_status") == "completed")
     captured = capture["status"] == "durable" and model_check["verified"] and oracle_terminal
+    close_ready = bool(
+        binding
+        and submission == "observed"
+        and capture["status"] == "durable"
+        and oracle_completed
+    )
     state.update(
         {
             "status": "captured" if captured else "attention_required",
@@ -876,7 +1129,7 @@ def _finalize_capture(
     )
     # Persist the complete capture evidence before touching the browser target.
     _write_json_atomic(state_path, state)
-    if not captured or binding is None or isinstance(preflight, dict):
+    if not close_ready or binding is None or isinstance(preflight, dict):
         return state
     close_result = tab_closer(binding)
     state["tab_close"] = close_result
@@ -904,6 +1157,8 @@ def _start_personalized_browser(
     profile_path: Path,
     cdp_port: int,
     *,
+    chatgpt_url: str = CHATGPT_URL,
+    project_bootstrap: Mapping[str, str] | None = None,
     run_factory: Callable[..., Any] = subprocess.run,
 ) -> dict[str, Any]:
     if len(command) < 2:
@@ -912,9 +1167,19 @@ def _start_personalized_browser(
     entry = Path(command[1]).expanduser().resolve()
     package_root = entry.parents[2]
     helper = Path(__file__).with_name("oracle_temporary_personalization_preflight.mjs").resolve()
+    argv = [
+        str(node),
+        str(helper),
+        str(package_root),
+        str(Path(__file__).with_name("oracle_temporary_personalization.mjs").resolve()),
+        str(profile_path.resolve()),
+        str(cdp_port),
+        chatgpt_url,
+    ]
+    if project_bootstrap is not None:
+        argv.append(json.dumps(dict(project_bootstrap), ensure_ascii=False, separators=(",", ":")))
     completed = run_factory(
-        [str(node), str(helper), str(package_root), str(Path(__file__).with_name("oracle_temporary_personalization.mjs").resolve()),
-         str(profile_path.resolve()), str(cdp_port), CHATGPT_URL],
+        argv,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -923,11 +1188,32 @@ def _start_personalized_browser(
         timeout=120,
         **_subprocess_kwargs(),
     )
+    expected_project_url = None
+    if project_bootstrap is None and _is_exact_workspace_project_url(chatgpt_url):
+        expected_project_url = _normalize_project_url(chatgpt_url)
     if completed.returncode != 0:
+        detail_text = (completed.stderr or completed.stdout).strip()[-1200:]
+        try:
+            failure = json.loads(detail_text)
+        except json.JSONDecodeError:
+            failure = None
+        failure_code = str(failure.get("code") or "") if isinstance(failure, dict) else ""
+        if failure_code.startswith("WORKSPACE_PROJECT_"):
+            raise ExecutionError(
+                failure_code,
+                str(failure.get("error") or "ChatGPT Project initialization failed"),
+                {"detail": detail_text},
+            )
+        if expected_project_url is not None:
+            raise ExecutionError(
+                "WORKSPACE_PROJECT_PREFLIGHT_FAILED",
+                "workspace Project browser preflight failed before submission",
+                {"detail": detail_text, "project_url": expected_project_url},
+            )
         raise ExecutionError(
             "TEMPORARY_PERSONALIZATION_UNCONFIRMED",
             "temporary-chat personalization could not be confirmed before submission",
-            {"detail": (completed.stderr or completed.stdout).strip()[-1200:]},
+            {"detail": detail_text},
         )
     try:
         result = json.loads(completed.stdout)
@@ -942,7 +1228,31 @@ def _start_personalized_browser(
         or not str(result.get("conversation_url") or "").startswith("https://chatgpt.com/")
         or not str(result.get("browser_ws") or "").startswith(f"ws://127.0.0.1:{cdp_port}/")
     ):
-        raise ExecutionError("TEMPORARY_PERSONALIZATION_UNCONFIRMED", "personalization preflight evidence is incomplete")
+        code = "WORKSPACE_PROJECT_PREFLIGHT_FAILED" if expected_project_url is not None or project_bootstrap is not None else "TEMPORARY_PERSONALIZATION_UNCONFIRMED"
+        raise ExecutionError(code, "browser preflight evidence is incomplete")
+    if project_bootstrap is None:
+        if str(result.get("conversation_url") or "") != chatgpt_url:
+            raise ExecutionError("WORKSPACE_PROJECT_URL_UNCONFIRMED", "browser did not remain on the requested ChatGPT URL")
+        if expected_project_url is not None:
+            if _normalize_project_url(result.get("project_url")) != expected_project_url:
+                raise ExecutionError("WORKSPACE_PROJECT_URL_UNCONFIRMED", "browser did not bind the exact workspace Project URL")
+            if result.get("personalization") != "not-applicable":
+                raise ExecutionError("WORKSPACE_PROJECT_PREFLIGHT_FAILED", "workspace Project run unexpectedly used temporary-chat personalization")
+    else:
+        project_url = _normalize_project_url(result.get("project_url"))
+        if str(result.get("conversation_url") or "") != project_url:
+            raise ExecutionError("WORKSPACE_PROJECT_URL_UNCONFIRMED", "browser did not confirm the initialized workspace Project page")
+        if result.get("instructions_verified") is not True:
+            warning = result.get("instructions_warning")
+            if (
+                not isinstance(warning, dict)
+                or warning.get("code") != "WORKSPACE_PROJECT_INSTRUCTIONS_FAILED"
+                or not str(warning.get("error") or "").strip()
+            ):
+                raise ExecutionError(
+                    "WORKSPACE_PROJECT_INSTRUCTIONS_FAILED",
+                    "workspace Project instructions were not verified and no best-effort warning evidence was returned",
+                )
     return result
 
 
@@ -1017,6 +1327,87 @@ def _prepare_run_profile(config: ExecutionConfig, run_dir: Path) -> Path:
     return destination
 
 
+def _workspace_project_preview(config: ExecutionConfig) -> dict[str, Any]:
+    path = _workspace_project_map_path(config)
+    payload = _load_workspace_project_map(path)
+    mapped = _mapped_workspace_project(config, payload)
+    return {
+        "name": _workspace_project_name(config),
+        "run_id": config.run_id,
+        "session_id": config.session_id,
+        "key": _workspace_project_key(config),
+        "map_path": str(path),
+        "mapped": mapped is not None,
+        "url": mapped["url"] if mapped else None,
+        "bootstrap_required": mapped is None,
+    }
+
+
+def _open_workspace_project_browser(
+    config: ExecutionConfig,
+    command: Sequence[str],
+    profile_path: Path,
+    cdp_port: int,
+    browser_preflight: Callable[..., dict[str, Any]],
+    browser_cleanup: Callable[..., dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, str]]:
+    map_path = _workspace_project_map_path(config)
+    with _workspace_project_lock(config, map_path):
+        payload = _load_workspace_project_map(map_path)
+        mapped = _mapped_workspace_project(config, payload)
+        bootstrap_evidence: dict[str, Any] | None = None
+        if mapped is None:
+            bootstrap = {
+                "name": _workspace_project_name(config),
+                "instructions": _workspace_project_instructions(config),
+            }
+            bootstrap_port = _reserve_cdp_port()
+            bootstrap_preflight = browser_preflight(
+                command,
+                profile_path,
+                bootstrap_port,
+                chatgpt_url=CHATGPT_HOME_URL,
+                project_bootstrap=bootstrap,
+            )
+            bootstrap_evidence = {
+                "instructions_verified": bootstrap_preflight.get("instructions_verified") is True,
+                **(
+                    {"instructions_warning": bootstrap_preflight["instructions_warning"]}
+                    if isinstance(bootstrap_preflight.get("instructions_warning"), dict)
+                    else {}
+                ),
+            }
+            mapped = _write_workspace_project_mapping(
+                config,
+                map_path,
+                payload,
+                url=str(bootstrap_preflight.get("project_url") or ""),
+            )
+            cleanup = browser_cleanup(
+                bootstrap_preflight,
+                command,
+                expected_url=mapped["url"],
+            )
+            if cleanup.get("status") != "closed":
+                raise ExecutionError(
+                    "WORKSPACE_PROJECT_BOOTSTRAP_CLEANUP_UNCONFIRMED",
+                    "workspace Project was initialized but its owned bootstrap browser could not be closed safely",
+                    {"cleanup": cleanup, "project_url": mapped["url"]},
+                )
+        chatgpt_url = _workspace_project_chat_url(mapped["url"])
+        preflight = browser_preflight(
+            command,
+            profile_path,
+            cdp_port,
+            chatgpt_url=chatgpt_url,
+            project_bootstrap=None,
+        )
+        if bootstrap_evidence is not None:
+            preflight = dict(preflight)
+            preflight["workspace_project_bootstrap"] = bootstrap_evidence
+        return preflight, mapped
+
+
 def execute_config(
     config: ExecutionConfig,
     *,
@@ -1035,12 +1426,27 @@ def execute_config(
     slug = _slug(config)
     cdp_port = _reserve_cdp_port()
     if dry_run:
-        argv = build_oracle_argv(config, logical_command, output_path, slug, cdp_port=cdp_port)
+        project_preview = _workspace_project_preview(config)
+        preview_url = CHATGPT_URL
+        if project_preview["mapped"]:
+            try:
+                preview_url = _workspace_project_chat_url(str(project_preview["url"]))
+            except ExecutionError as exc:
+                project_preview["live_execution_blocker"] = exc.envelope()["error"]
+        argv = build_oracle_argv(
+            config,
+            logical_command,
+            output_path,
+            slug,
+            cdp_port=cdp_port,
+            chatgpt_url=preview_url,
+        )
         return {
             "ok": True,
             "status": "dry-run",
             "run_dir": str(run_dir),
             "contract": public_contract(config),
+            "workspace_project": project_preview,
             "argv": _redacted_argv(argv),
             "writes_performed": False,
         }
@@ -1081,10 +1487,15 @@ def execute_config(
         stdout_path.touch()
         stderr_path.touch()
         launch_attempted = False
+        profile_prepared = False
         preflight: dict[str, Any] | None = None
         try:
             profile_path = _prepare_run_profile(config, run_dir)
-            preflight = browser_preflight(command, profile_path, cdp_port)
+            profile_prepared = True
+            preflight, workspace_project = _open_workspace_project_browser(
+                config, command, profile_path, cdp_port, browser_preflight, browser_cleanup
+            )
+            state["workspace_project"] = workspace_project
             state["personalization_preflight"] = preflight
             _write_json_atomic(state_path, state)
             argv = build_oracle_argv(
@@ -1094,6 +1505,7 @@ def execute_config(
                 slug,
                 cdp_port=cdp_port,
                 browser_tab=str(preflight["target_id"]),
+                chatgpt_url=str(preflight["conversation_url"]),
             )
             with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
                 process = popen_factory(
@@ -1115,7 +1527,14 @@ def execute_config(
                 state["browser_cleanup"] = browser_cleanup(preflight, command)
             state.update({"status": "attention_required",
                           "submission": "unknown" if launch_attempted else "not_observed",
-                          "failure_stage": "oracle-launch-or-observation" if launch_attempted else "profile-preparation",
+                          "failure_stage": (
+                              "oracle-launch-or-observation"
+                              if launch_attempted
+                              else "workspace-project-bootstrap"
+                              if profile_prepared
+                              else "profile-preparation"
+                          ),
+                          "error_code": exc.code if isinstance(exc, ExecutionError) else None,
                           "error": str(exc)})
             _write_json_atomic(state_path, state)
             return {"ok": False, "status": state["status"], "run_dir": str(run_dir), "result": state}
@@ -1126,11 +1545,19 @@ def execute_config(
             output_path=output_path,
             tab_closer=tab_closer,
         )
-        if state["status"] == "captured" and preflight is not None:
+        binding = state.get("oracle", {}).get("binding")
+        cleanup_ready = bool(
+            preflight is not None
+            and isinstance(binding, Mapping)
+            and state.get("submission") == "observed"
+            and state.get("capture") == "durable"
+            and binding.get("session_status") == "completed"
+        )
+        if cleanup_ready:
             cleanup = browser_cleanup(
                 preflight,
                 command,
-                expected_url=str(state["oracle"]["binding"]["conversation_url"]),
+                expected_url=str(binding["conversation_url"]),
             )
             state["browser_cleanup"] = cleanup
             if cleanup.get("status") != "closed":
@@ -1237,11 +1664,19 @@ def _reconnect_locked(
         tab_closer=tab_closer,
     )
     preflight = state.get("personalization_preflight")
-    if state["status"] == "captured" and isinstance(preflight, dict):
+    binding = state.get("oracle", {}).get("binding")
+    cleanup_ready = bool(
+        isinstance(preflight, dict)
+        and isinstance(binding, Mapping)
+        and state.get("submission") == "observed"
+        and state.get("capture") == "durable"
+        and binding.get("session_status") == "completed"
+    )
+    if cleanup_ready:
         cleanup = browser_cleanup(
             preflight,
             command,
-            expected_url=str(state["oracle"]["binding"]["conversation_url"]),
+            expected_url=str(binding["conversation_url"]),
         )
         state["browser_cleanup"] = cleanup
         if cleanup.get("status") != "closed":

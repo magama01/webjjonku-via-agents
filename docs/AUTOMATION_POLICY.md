@@ -14,7 +14,8 @@ records retain their original meaning and are never rewritten by this policy.
   numerically to obtain Pro. Only the hash-bound Korean Latest and quota-limited
   four-tier compatibility fixes remain; retire them when upstream covers both.
   A disabled Pro option must never silently fall back to another effort.
-- Use temporary chats. The runner enables and confirms temporary-chat personalization before submission; it does not change account settings. If confirmation fails, do not submit.
+- User-authorized workspace Projects use their mapped Project URL and saved Chat conversations. Confirm Chat mode before submission; Work mode does not provide the same connected tools. Never fall back silently to a temporary chat when Project setup fails.
+- The temporary-chat path enables and confirms temporary-chat personalization before submission; it does not change account settings. If confirmation fails, do not submit.
   Do not silently change account, privacy, app, or permission settings.
 - Check the actual selected model once before submission. Do not duplicate
   that check through multiple receipts or recurring qualification stages.

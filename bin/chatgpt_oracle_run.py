@@ -4278,6 +4278,7 @@ def build_parser() -> argparse.ArgumentParser:
     execute_parser.add_argument("--mission-path", type=Path)
     execute_parser.add_argument("--run-root", type=Path)
     execute_parser.add_argument("--run-id")
+    execute_parser.add_argument("--session-id", help="session identifier to reuse ChatGPT workspace project across runs")
     # Keep selection arguments unset at parse time so an explicit override can
     # never be silently discarded when --manifest already owns the selection.
     execute_parser.add_argument("--model", choices=EXECUTOR.SUPPORTED_MODELS)
@@ -4410,6 +4411,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _detect_session_id(cli_session_id: str | None) -> str | None:
+    if cli_session_id and str(cli_session_id).strip():
+        return str(cli_session_id).strip()
+    return (
+        str(os.environ.get("WEBJJONKU_SESSION_ID") or "").strip()
+        or str(os.environ.get("CODEX_SESSION_ID") or "").strip()
+        or str(os.environ.get("AGY_CONVERSATION_ID") or "").strip()
+        or str(os.environ.get("ANTIGRAVITY_CONVERSATION_ID") or "").strip()
+        or str(os.environ.get("CLAUDE_CONVERSATION_ID") or "").strip()
+        or str(os.environ.get("CLAUDE_SESSION_ID") or "").strip()
+        or None
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -4422,6 +4437,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         args.mission_path,
                         args.run_root,
                         args.run_id,
+                        args.session_id,
                         args.model,
                         args.effort,
                         args.app_name,
@@ -4429,7 +4445,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ):
                     raise EXECUTOR.ExecutionError(
                         "EXECUTE_ARGUMENTS_CONFLICT",
-                        "--manifest cannot be combined with direct root, mission, run identity, model, effort, or app arguments",
+                        "--manifest cannot be combined with direct root, mission, run identity, session, model, effort, or app arguments",
                     )
                 payload = EXECUTOR.execute_manifest(args.manifest, dry_run=args.dry_run)
             else:
@@ -4438,11 +4454,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "EXECUTE_ARGUMENTS_REQUIRED",
                         "execute requires --project-root and --mission-path when --manifest is omitted",
                     )
+                resolved_session = _detect_session_id(args.session_id)
                 config = EXECUTOR.make_config(
                     project_root=args.project_root,
                     mission_path=args.mission_path,
                     run_root=args.run_root,
                     run_id=args.run_id,
+                    session_id=resolved_session,
                     model=args.model or EXECUTOR.DEFAULT_MODEL,
                     effort=args.effort or EXECUTOR.DEFAULT_EFFORT,
                     app_name=args.app_name or EXECUTOR.DEFAULT_APP_NAME,
