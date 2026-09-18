@@ -27,14 +27,20 @@ def executor():
     return load_module()
 
 
-def fake_preflight(_command, _profile, port):
+def fake_preflight(_command, _profile, port, *, chatgpt_url="https://chatgpt.com/?temporary-chat=true", project_bootstrap=None):
+    project_url = "https://chatgpt.com/g/g-p-workspace123/project"
+    is_project = project_bootstrap is not None or chatgpt_url == project_url
+    conversation_url = project_url if project_bootstrap else chatgpt_url
     return {
         "ok": True,
         "pid": 1234,
         "port": port,
         "target_id": "B" * 32,
-        "conversation_url": "https://chatgpt.com/?temporary-chat=true",
+        "conversation_url": conversation_url,
         "browser_ws": f"ws://127.0.0.1:{port}/devtools/browser/test",
+        "personalization": "not-applicable" if is_project else "enabled",
+        **({"project_url": project_url} if is_project else {}),
+        **({"project_created": True, "instructions_verified": True} if project_bootstrap else {}),
     }
 
 
@@ -42,8 +48,24 @@ def fake_cleanup(*_args, **_kwargs):
     return {"status": "closed"}
 
 
+def seed_run_project(executor, config, url="https://chatgpt.com/g/g-p-workspace123/project"):
+    path = executor._workspace_project_map_path(config)
+    payload = executor._load_workspace_project_map(path)
+    executor._write_workspace_project_mapping(config, path, payload, url=url)
+
+
 def browser_port(argv):
     return int(argv[argv.index("--remote-chrome") + 1].rsplit(":", 1)[1])
+
+
+def test_high_effort_is_forwarded_without_pro_upgrade(executor, execution_paths):
+    root, mission, run_root, *_ = execution_paths
+    config = executor.make_config(
+        project_root=root, mission_path=mission, run_root=run_root,
+        model="gpt-5.6-sol", effort="extended",
+    )
+    argv = executor.build_oracle_argv(config, ["node", "oracle.js"], run_root / "output.md", "high-check")
+    assert argv[argv.index("--browser-thinking-time") + 1] == "extended"
 
 
 def test_process_probe_does_not_signal_on_windows(executor, monkeypatch):
@@ -77,6 +99,18 @@ def execution_paths(tmp_path: Path, monkeypatch, executor):
     profile.mkdir()
     monkeypatch.setenv("ORACLE_SESSION_ROOT", str(session_root))
     monkeypatch.setenv("ORACLE_BROWSER_PROFILE_DIR", str(profile))
+    project_map = tmp_path / "host-state" / "workspace-projects.json"
+    monkeypatch.setenv("CODEX_ORACLE_PROJECT_MAP_PATH", str(project_map))
+    project_map.parent.mkdir(parents=True, exist_ok=True)
+    project_map.write_text(json.dumps({
+        "schema": executor.WORKSPACE_PROJECT_MAP_SCHEMA,
+        "projects": {
+            str(root): {
+                "name": root.name,
+                "url": "https://chatgpt.com/g/g-p-workspace123/project",
+            }
+        },
+    }), encoding="utf-8")
     monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
     return root, mission, run_root, session_root
 
@@ -126,6 +160,77 @@ def test_personalization_preflight_is_bound_before_remote_oracle(executor, tmp_p
     result = executor._start_personalized_browser([str(node), str(entry)], profile, 49152, run_factory=run)
     assert result["target_id"] == "B" * 32
     assert observed[0][0][-2:] == ["49152", "https://chatgpt.com/?temporary-chat=true"]
+
+
+def test_mapped_project_preflight_failure_is_explicit_and_never_rewritten_as_temporary_chat(executor, tmp_path):
+    node = tmp_path / "node.exe"
+    entry = tmp_path / "oracle" / "dist" / "bin" / "oracle-cli.js"
+    profile = tmp_path / "profile"
+    entry.parent.mkdir(parents=True)
+    profile.mkdir()
+    node.write_bytes(b"node")
+    entry.write_bytes(b"oracle")
+    project_url = "https://chatgpt.com/g/g-p-workspace123/project"
+    observed = []
+
+    def run(argv, **kwargs):
+        observed.append(argv)
+        return SimpleNamespace(returncode=2, stdout="", stderr=json.dumps({
+            "ok": False,
+            "code": "WORKSPACE_PROJECT_TARGET_UNCONFIRMED",
+            "error": "owned workspace Project startup target is unavailable",
+        }))
+
+    with pytest.raises(executor.ExecutionError) as exc:
+        executor._start_personalized_browser(
+            [str(node), str(entry)], profile, 49152, chatgpt_url=project_url, run_factory=run
+        )
+
+    assert exc.value.code == "WORKSPACE_PROJECT_TARGET_UNCONFIRMED"
+    assert observed[0][-1] == project_url
+    assert "temporary-chat=true" not in " ".join(observed[0])
+
+
+def test_project_bootstrap_accepts_best_effort_instruction_warning(executor, tmp_path):
+    node = tmp_path / "node.exe"
+    entry = tmp_path / "oracle" / "dist" / "bin" / "oracle-cli.js"
+    profile = tmp_path / "profile"
+    entry.parent.mkdir(parents=True)
+    profile.mkdir()
+    node.write_bytes(b"node")
+    entry.write_bytes(b"oracle")
+    project_url = "https://chatgpt.com/g/g-p-workspace123/project"
+    warning = {
+        "code": "WORKSPACE_PROJECT_INSTRUCTIONS_FAILED",
+        "error": "Project instructions save action is unavailable",
+    }
+
+    def run(argv, **kwargs):
+        return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps({
+            "ok": True,
+            "pid": 1234,
+            "port": 49152,
+            "target_id": "B" * 32,
+            "conversation_url": project_url,
+            "project_url": project_url,
+            "project_created": True,
+            "instructions_verified": False,
+            "instructions_warning": warning,
+            "personalization": "not-applicable",
+            "browser_ws": "ws://127.0.0.1:49152/devtools/browser/test",
+        }))
+
+    result = executor._start_personalized_browser(
+        [str(node), str(entry)],
+        profile,
+        49152,
+        chatgpt_url="https://chatgpt.com/",
+        project_bootstrap={"name": "project", "instructions": "instructions"},
+        run_factory=run,
+    )
+    assert result["project_url"] == project_url
+    assert result["instructions_verified"] is False
+    assert result["instructions_warning"] == warning
 
 
 def test_cleanup_delegates_exact_browser_and_tab_identity_once(executor):
@@ -372,6 +477,9 @@ def test_manifest_is_minimal_and_rejects_retired_fields(executor, execution_path
 
 def test_dry_run_has_temp_personalized_route_and_no_writes(executor, execution_paths):
     root, mission, run_root, _ = execution_paths
+    executor._workspace_project_map_path(
+        executor.make_config(project_root=root, mission_path=mission, run_root=run_root)
+    ).unlink()
     config = executor.make_config(
         project_root=root,
         mission_path=mission,
@@ -383,7 +491,11 @@ def test_dry_run_has_temp_personalized_route_and_no_writes(executor, execution_p
     argv = result["argv"]
 
     assert result["writes_performed"] is False
+    assert result["workspace_project"]["name"] == root.name
+    assert result["workspace_project"]["run_id"] == config.run_id
+    assert result["workspace_project"]["bootstrap_required"] is True
     assert not run_root.exists()
+    assert not Path(result["workspace_project"]["map_path"]).exists()
     assert argv[argv.index("--model") + 1] == "latest"
     assert argv[argv.index("--browser-model-strategy") + 1] == "select"
     assert argv[argv.index("--browser-thinking-time") + 1] == "pro"
@@ -398,6 +510,394 @@ def test_dry_run_has_temp_personalized_route_and_no_writes(executor, execution_p
     assert "--browser-tab" not in argv
     assert argv[argv.index("--prompt") + 1] == "<mission-handoff>"
     assert "TASK_OUTCOME" not in " ".join(argv)
+
+
+def test_workspace_project_bootstrap_is_mapped_once_and_reused_for_same_run_id(executor, execution_paths):
+    root, mission, run_root, _ = execution_paths
+    config = executor.make_config(
+        project_root=root, mission_path=mission, run_root=run_root, run_id="ordinary-project-session-0001"
+    )
+    executor._workspace_project_map_path(config).unlink()
+    profile = config.copy_profile
+    calls = []
+    cleanup_calls = []
+    project_url = "https://chatgpt.com/g/g-p-workspace123/project"
+
+    def preflight(command, profile_path, port, *, chatgpt_url, project_bootstrap):
+        calls.append({"url": chatgpt_url, "bootstrap": project_bootstrap, "port": port})
+        return {
+            "ok": True,
+            "pid": 1234,
+            "port": port,
+            "target_id": "B" * 32,
+            "conversation_url": project_url if project_bootstrap else chatgpt_url,
+            "browser_ws": f"ws://127.0.0.1:{port}/devtools/browser/test",
+            "personalization": "not-applicable",
+            "project_url": project_url,
+            **({"project_created": True, "instructions_verified": True} if project_bootstrap else {}),
+        }
+
+    def cleanup(preflight, command, *, expected_url):
+        cleanup_calls.append((preflight["port"], expected_url))
+        return {"status": "closed", "target_id": preflight["target_id"]}
+
+    first, first_mapping = executor._open_workspace_project_browser(
+        config, ["oracle"], profile, 43123, preflight, cleanup
+    )
+    second, second_mapping = executor._open_workspace_project_browser(
+        config, ["oracle"], profile, 43124, preflight, cleanup
+    )
+
+    assert first_mapping == {"name": root.name, "url": project_url}
+    assert second_mapping == first_mapping
+    assert calls[0]["url"] == "https://chatgpt.com/"
+    assert calls[0]["bootstrap"]["name"] == root.name
+    instructions = calls[0]["bootstrap"]["instructions"]
+    assert str(root) in instructions
+    assert "한국어" in instructions
+    assert "AGENTS.md" in instructions
+    assert "DevSpace" in instructions
+    assert calls[1]["url"] == project_url
+    assert calls[1]["bootstrap"] is None
+    assert calls[1]["port"] == 43123
+    assert calls[2] == {
+        "url": project_url,
+        "bootstrap": None,
+        "port": 43124,
+    }
+    assert cleanup_calls == [(calls[0]["port"], project_url)]
+    assert first["conversation_url"] == project_url
+    assert second["conversation_url"] == project_url
+    map_path = executor._workspace_project_map_path(config)
+    payload = json.loads(map_path.read_text(encoding="utf-8"))
+    assert payload == {
+        "schema": executor.WORKSPACE_PROJECT_MAP_SCHEMA,
+        "projects": {
+            config.run_id: {
+                "run_id": config.run_id,
+                "workspace_root": str(root),
+                "name": root.name,
+                "url": project_url,
+            }
+        },
+    }
+
+
+def test_workspace_project_mapping_is_scoped_to_run_id_not_workspace_or_codex_thread(executor, execution_paths):
+    root, mission, run_root, _ = execution_paths
+    owner = "01234567-89ab-cdef-0123-456789abcdef"
+    first_config = executor.make_config(
+        project_root=root,
+        mission_path=mission,
+        run_root=run_root,
+        run_id="ordinary-project-session-1001",
+        source_thread_id=owner,
+    )
+    second_config = executor.make_config(
+        project_root=root,
+        mission_path=mission,
+        run_root=run_root,
+        run_id="ordinary-project-session-1002",
+        source_thread_id=owner,
+    )
+    map_path = executor._workspace_project_map_path(first_config)
+    map_path.unlink()
+    created_urls = iter([
+        "https://chatgpt.com/g/g-p-session1001/project",
+        "https://chatgpt.com/g/g-p-session1002/project",
+    ])
+    calls = []
+
+    def preflight(command, profile_path, port, *, chatgpt_url, project_bootstrap):
+        calls.append((chatgpt_url, project_bootstrap))
+        if project_bootstrap is not None:
+            url = next(created_urls)
+            return {
+                "ok": True,
+                "pid": 1234,
+                "port": port,
+                "target_id": "B" * 32,
+                "conversation_url": url,
+                "project_url": url,
+                "project_created": True,
+                "instructions_verified": True,
+                "personalization": "not-applicable",
+                "browser_ws": f"ws://127.0.0.1:{port}/devtools/browser/bootstrap",
+            }
+        return {
+            "ok": True,
+            "pid": 1235,
+            "port": port,
+            "target_id": "C" * 32,
+            "conversation_url": chatgpt_url,
+            "project_url": chatgpt_url,
+            "personalization": "not-applicable",
+            "browser_ws": f"ws://127.0.0.1:{port}/devtools/browser/run",
+        }
+
+    cleanup = lambda *_args, **_kwargs: {"status": "closed", "target_id": "B" * 32}
+    _, first_mapping = executor._open_workspace_project_browser(
+        first_config, ["oracle"], first_config.copy_profile, 43123, preflight, cleanup
+    )
+    _, second_mapping = executor._open_workspace_project_browser(
+        second_config, ["oracle"], second_config.copy_profile, 43124, preflight, cleanup
+    )
+    _, first_reconnect_mapping = executor._open_workspace_project_browser(
+        first_config, ["oracle"], first_config.copy_profile, 43125, preflight, cleanup
+    )
+
+    assert first_mapping["url"] == "https://chatgpt.com/g/g-p-session1001/project"
+    assert second_mapping["url"] == "https://chatgpt.com/g/g-p-session1002/project"
+    assert first_reconnect_mapping == first_mapping
+    assert [bootstrap is not None for _, bootstrap in calls] == [True, False, True, False, False]
+    payload = json.loads(map_path.read_text(encoding="utf-8"))
+    assert payload["projects"][first_config.run_id]["workspace_root"] == str(root)
+    assert payload["projects"][second_config.run_id]["workspace_root"] == str(root)
+    assert payload["projects"][first_config.run_id]["url"] != payload["projects"][second_config.run_id]["url"]
+
+
+def test_historical_workspace_mapping_is_preserved_but_not_reused(executor, execution_paths):
+    root, mission, run_root, _ = execution_paths
+    config = executor.make_config(
+        project_root=root, mission_path=mission, run_root=run_root, run_id="ordinary-project-session-2001"
+    )
+    map_path = executor._workspace_project_map_path(config)
+    historical_url = "https://chatgpt.com/g/g-p-historical/project"
+    new_url = "https://chatgpt.com/g/g-p-current2001/project"
+    historical_entry = {"name": root.name, "url": historical_url}
+    map_path.write_text(json.dumps({
+        "schema": executor.WORKSPACE_PROJECT_MAP_SCHEMA,
+        "projects": {str(root): historical_entry},
+    }), encoding="utf-8")
+
+    preview = executor._workspace_project_preview(config)
+    assert preview["mapped"] is False
+    assert preview["bootstrap_required"] is True
+    assert preview["run_id"] == config.run_id
+
+    def preflight(command, profile_path, port, *, chatgpt_url, project_bootstrap):
+        url = new_url if project_bootstrap is not None else chatgpt_url
+        return {
+            "ok": True,
+            "pid": 1234,
+            "port": port,
+            "target_id": "B" * 32,
+            "conversation_url": url,
+            "project_url": url,
+            "personalization": "not-applicable",
+            **({"project_created": True, "instructions_verified": True} if project_bootstrap else {}),
+            "browser_ws": f"ws://127.0.0.1:{port}/devtools/browser/test",
+        }
+
+    _, mapping = executor._open_workspace_project_browser(
+        config,
+        ["oracle"],
+        config.copy_profile,
+        43123,
+        preflight,
+        lambda *_args, **_kwargs: {"status": "closed", "target_id": "B" * 32},
+    )
+    assert mapping["url"] == new_url
+    payload = json.loads(map_path.read_text(encoding="utf-8"))
+    assert payload["projects"][str(root)] == historical_entry
+    assert payload["projects"][config.run_id] == {
+        "run_id": config.run_id,
+        "workspace_root": str(root),
+        "name": root.name,
+        "url": new_url,
+    }
+
+
+def test_workspace_project_bootstrap_persists_instruction_warning_and_continues(executor, execution_paths):
+    root, mission, run_root, _ = execution_paths
+    config = executor.make_config(project_root=root, mission_path=mission, run_root=run_root)
+    executor._workspace_project_map_path(config).unlink()
+    project_url = "https://chatgpt.com/g/g-p-workspace123/project"
+    warning = {
+        "code": "WORKSPACE_PROJECT_INSTRUCTIONS_FAILED",
+        "error": "Project instructions editor is missing or ambiguous",
+    }
+    calls = []
+
+    def preflight(command, profile_path, port, *, chatgpt_url, project_bootstrap):
+        calls.append((chatgpt_url, project_bootstrap))
+        if project_bootstrap is not None:
+            return {
+                "ok": True,
+                "pid": 1234,
+                "port": port,
+                "target_id": "B" * 32,
+                "conversation_url": project_url,
+                "project_url": project_url,
+                "project_created": True,
+                "instructions_verified": False,
+                "instructions_warning": warning,
+                "personalization": "not-applicable",
+                "browser_ws": f"ws://127.0.0.1:{port}/devtools/browser/bootstrap",
+            }
+        return {
+            "ok": True,
+            "pid": 1235,
+            "port": port,
+            "target_id": "C" * 32,
+            "conversation_url": chatgpt_url,
+            "project_url": chatgpt_url,
+            "personalization": "not-applicable",
+            "browser_ws": f"ws://127.0.0.1:{port}/devtools/browser/run",
+        }
+
+    preflight_result, mapping = executor._open_workspace_project_browser(
+        config,
+        ["oracle"],
+        config.copy_profile,
+        43123,
+        preflight,
+        lambda *_args, **_kwargs: {"status": "closed", "target_id": "B" * 32},
+    )
+
+    assert mapping == {"name": root.name, "url": project_url}
+    assert calls[0][0] == "https://chatgpt.com/"
+    assert calls[1] == (project_url, None)
+    assert preflight_result["conversation_url"] == project_url
+    assert preflight_result["workspace_project_bootstrap"] == {
+        "instructions_verified": False,
+        "instructions_warning": warning,
+    }
+
+
+def test_workspace_project_chat_url_uses_exact_regular_project_url():
+    module = load_module()
+    project_url = "https://chatgpt.com/g/g-p-workspace123/project"
+    assert module._workspace_project_chat_url(project_url) == project_url
+    assert module._workspace_project_chat_url(f"{project_url}/") == project_url
+
+
+def test_live_project_bootstrap_maps_then_executes_regular_project_chat(tmp_path: Path, monkeypatch):
+    module = load_module()
+    root = tmp_path / "project"
+    root.mkdir()
+    mission = root / "mission.md"
+    mission.write_text("Use the workspace Project.\n", encoding="utf-8")
+    run_root = tmp_path / "runs"
+    session_root = tmp_path / "oracle-sessions"
+    profile = tmp_path / "signed-in-profile"
+    profile.mkdir()
+    project_map = tmp_path / "state" / "workspace-projects.json"
+    monkeypatch.setenv("ORACLE_SESSION_ROOT", str(session_root))
+    monkeypatch.setenv("ORACLE_BROWSER_PROFILE_DIR", str(profile))
+    monkeypatch.setenv("CODEX_ORACLE_PROJECT_MAP_PATH", str(project_map))
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    config = module.make_config(
+        project_root=root,
+        mission_path=mission,
+        run_root=run_root,
+        run_id="project-bootstrap-regular",
+    )
+    project_url = "https://chatgpt.com/g/g-p-workspace123/project"
+    preflight_calls = []
+    cleanup_calls = []
+
+    def preflight(command, profile_path, port, *, chatgpt_url, project_bootstrap):
+        preflight_calls.append((chatgpt_url, project_bootstrap, port))
+        if project_bootstrap is not None:
+            assert chatgpt_url == "https://chatgpt.com/"
+            assert project_bootstrap["name"] == root.name
+            return {
+                "ok": True,
+                "pid": 1234,
+                "port": port,
+                "target_id": "B" * 32,
+                "conversation_url": project_url,
+                "project_url": project_url,
+                "project_created": True,
+                "instructions_verified": True,
+                "personalization": "not-applicable",
+                "browser_ws": f"ws://127.0.0.1:{port}/devtools/browser/bootstrap",
+            }
+        assert chatgpt_url == project_url
+        return {
+            "ok": True,
+            "pid": 1235,
+            "port": port,
+            "target_id": "B" * 32,
+            "conversation_url": project_url,
+            "project_url": project_url,
+            "personalization": "not-applicable",
+            "browser_ws": f"ws://127.0.0.1:{port}/devtools/browser/run",
+        }
+
+    def cleanup(preflight_result, command, *, expected_url=None):
+        cleanup_calls.append(expected_url or preflight_result["conversation_url"])
+        return {"status": "closed", "target_id": preflight_result["target_id"]}
+
+    def popen(argv, **kwargs):
+        assert argv[argv.index("--chatgpt-url") + 1] == project_url
+        output = Path(argv[argv.index("--write-output") + 1])
+        output.write_text("Project answer.\n", encoding="utf-8")
+        kwargs["stdout"].write(native_latest_evidence().encode())
+        kwargs["stdout"].flush()
+        write_session_meta(
+            session_root,
+            argv[argv.index("--slug") + 1],
+            status="completed",
+            port=browser_port(argv),
+        )
+        return Process(0)
+
+    result = module.execute_config(
+        config,
+        command_resolver=lambda: ["oracle"],
+        version_resolver=lambda command: "oracle 0.20.0",
+        compat_factory=lambda version: {"ok": True},
+        popen_factory=popen,
+        tab_closer=lambda binding: pytest.fail("owned preflight browser cleanup must own Project tab closure"),
+        browser_preflight=preflight,
+        browser_cleanup=cleanup,
+    )
+
+    assert [call[0] for call in preflight_calls] == ["https://chatgpt.com/", project_url]
+    assert cleanup_calls == [project_url, "https://chatgpt.com/c/owned-temporary-run"]
+    assert result["status"] == "captured"
+    assert result["result"]["submission"] == "observed"
+    assert result["result"]["workspace_project"] == {"name": root.name, "url": project_url}
+    payload = json.loads(project_map.read_text(encoding="utf-8"))
+    assert payload["projects"][config.run_id] == {
+        "run_id": config.run_id,
+        "workspace_root": str(root),
+        "name": root.name,
+        "url": project_url,
+    }
+
+
+def test_workspace_project_bootstrap_failure_is_explicit_and_not_mapped(executor, execution_paths):
+    root, mission, run_root, _ = execution_paths
+    bootstrap_config = executor.make_config(project_root=root, mission_path=mission, run_root=run_root)
+    executor._workspace_project_map_path(bootstrap_config).unlink()
+    config = executor.make_config(
+        project_root=root, mission_path=mission, run_root=run_root, run_id="ordinary-project-logout"
+    )
+    calls = 0
+
+    def logged_out(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise executor.ExecutionError("WORKSPACE_PROJECT_LOGGED_OUT", "ChatGPT is logged out")
+
+    result = executor.execute_config(
+        config,
+        command_resolver=lambda: ["oracle"],
+        version_resolver=lambda command: "oracle 0.20.0",
+        compat_factory=lambda version: {"ok": True},
+        browser_preflight=logged_out,
+        popen_factory=lambda *args, **kwargs: pytest.fail("must not submit without a workspace Project"),
+    )
+
+    assert calls == 1
+    assert result["status"] == "attention_required"
+    assert result["result"]["submission"] == "not_observed"
+    assert result["result"]["failure_stage"] == "workspace-project-bootstrap"
+    assert result["result"]["error_code"] == "WORKSPACE_PROJECT_LOGGED_OUT"
+    assert not executor._workspace_project_map_path(config).exists()
 
 
 @pytest.mark.parametrize("effort", ["pro", "extra-high"])
@@ -541,6 +1041,7 @@ def test_capture_state_is_durable_before_owned_tab_close(executor, execution_pat
         run_root=run_root,
         run_id="ordinary-run-0003",
     )
+    seed_run_project(executor, config)
     state_path = run_root / config.run_id / "state.json"
 
     def popen(argv, **kwargs):
@@ -586,11 +1087,56 @@ def test_capture_state_is_durable_before_owned_tab_close(executor, execution_pat
     assert cleanup_calls == [("B" * 32, ["oracle"], "https://chatgpt.com/c/owned-temporary-run")]
 
 
+def test_completed_owned_run_closes_browser_even_when_model_check_fails(executor, execution_paths):
+    root, mission, run_root, session_root = execution_paths
+    config = executor.make_config(
+        project_root=root, mission_path=mission, run_root=run_root, run_id="ordinary-model-check-fail"
+    )
+    seed_run_project(executor, config)
+    cleanup_calls = []
+
+    def popen(argv, **kwargs):
+        output = Path(argv[argv.index("--write-output") + 1])
+        output.write_text("Durably captured answer with missing model proof.\n", encoding="utf-8")
+        kwargs["stdout"].write(b"[browser] no usable model evidence\n")
+        kwargs["stdout"].flush()
+        write_session_meta(
+            session_root,
+            argv[argv.index("--slug") + 1],
+            status="completed",
+            port=browser_port(argv),
+        )
+        return Process(0)
+
+    def cleanup(preflight, command, *, expected_url):
+        cleanup_calls.append((preflight["target_id"], expected_url))
+        return {"status": "closed", "target_id": preflight["target_id"]}
+
+    result = executor.execute_config(
+        config,
+        command_resolver=lambda: ["oracle"],
+        version_resolver=lambda command: "oracle 0.20.0",
+        compat_factory=lambda version: {"ok": True},
+        popen_factory=popen,
+        tab_closer=lambda binding: pytest.fail("preflight browser cleanup owns this tab"),
+        browser_preflight=fake_preflight,
+        browser_cleanup=cleanup,
+    )
+
+    assert result["status"] == "attention_required"
+    assert result["result"]["submission"] == "observed"
+    assert result["result"]["capture"] == "durable"
+    assert result["result"]["model_check"]["verified"] is False
+    assert result["result"]["browser_cleanup"]["status"] == "closed"
+    assert cleanup_calls == [("B" * 32, "https://chatgpt.com/c/owned-temporary-run")]
+
+
 def test_preflight_target_mismatch_blocks_capture_and_preserves_browser(executor, execution_paths):
     root, mission, run_root, session_root = execution_paths
     config = executor.make_config(
         project_root=root, mission_path=mission, run_root=run_root, run_id="ordinary-run-mismatch"
     )
+    seed_run_project(executor, config)
 
     def popen(argv, **kwargs):
         Path(argv[argv.index("--write-output") + 1]).write_text("Answer from wrong tab.\n", encoding="utf-8")
@@ -627,6 +1173,7 @@ def test_popen_failure_cleans_owned_preflight_before_submission(executor, execut
     config = executor.make_config(
         project_root=root, mission_path=mission, run_root=run_root, run_id="ordinary-run-popen-fail"
     )
+    seed_run_project(executor, config)
     cleanup_calls = []
 
     def cleanup(preflight, command):
@@ -752,6 +1299,9 @@ def test_reconnect_is_prompt_free_and_uses_original_slug(executor, execution_pat
     run_dir = Path(first["run_dir"])
     original = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
     slug = original["oracle"]["slug"]
+    project_url = original["workspace_project"]["url"]
+    map_path = executor._workspace_project_map_path(config)
+    mapping_before_reconnect = map_path.read_bytes()
     before_preview = {path.name: path.read_bytes() for path in run_dir.iterdir() if path.is_file()}
     preview = executor.reconnect_run(run_dir, dry_run=True)
     assert preview["resubmit"] is False
@@ -777,6 +1327,8 @@ def test_reconnect_is_prompt_free_and_uses_original_slug(executor, execution_pat
     )
 
     assert recovered["ok"] is True
+    assert recovered["result"]["workspace_project"]["url"] == project_url
+    assert map_path.read_bytes() == mapping_before_reconnect
     assert recovery_argv[:3] == ["oracle", "session", slug]
     assert "--live" in recovery_argv
     assert "--prompt" not in recovery_argv
@@ -845,3 +1397,67 @@ def test_unreadable_prior_run_state_blocks_replacement_submission(executor, exec
         "state_error_code": "RUN_STATE_INVALID",
     }
     assert not (run_root / config.run_id).exists()
+
+
+def test_workspace_project_mapping_reuses_project_for_same_session_id(executor, execution_paths):
+    root, mission, run_root, _ = execution_paths
+    session = "2d30cc44-df98-4bb3-807c-b0703310d54a"
+    first_config = executor.make_config(
+        project_root=root,
+        mission_path=mission,
+        run_root=run_root,
+        run_id="session-run-1001",
+        session_id=session,
+    )
+    second_config = executor.make_config(
+        project_root=root,
+        mission_path=mission,
+        run_root=run_root,
+        run_id="session-run-1002",
+        session_id=session,
+    )
+    map_path = executor._workspace_project_map_path(first_config)
+    map_path.unlink(missing_ok=True)
+    created_urls = iter([
+        "https://chatgpt.com/g/g-p-session-shared/project",
+    ])
+    calls = []
+
+    def preflight(command, profile_path, port, *, chatgpt_url, project_bootstrap):
+        calls.append((chatgpt_url, project_bootstrap))
+        if project_bootstrap is not None:
+            url = next(created_urls)
+            return {
+                "ok": True,
+                "pid": 1234,
+                "port": port,
+                "target_id": "B" * 32,
+                "conversation_url": url,
+                "project_url": url,
+                "project_created": True,
+                "instructions_verified": True,
+                "personalization": "not-applicable",
+                "browser_ws": f"ws://127.0.0.1:{port}/devtools/browser/bootstrap",
+            }
+        return {
+            "ok": True,
+            "pid": 1235,
+            "port": port,
+            "target_id": "C" * 32,
+            "conversation_url": chatgpt_url,
+            "project_url": chatgpt_url,
+            "personalization": "not-applicable",
+            "browser_ws": f"ws://127.0.0.1:{port}/devtools/browser/run",
+        }
+
+    cleanup = lambda *_args, **_kwargs: {"status": "closed", "target_id": "B" * 32}
+    _, first_mapping = executor._open_workspace_project_browser(
+        first_config, ["oracle"], first_config.copy_profile, 43123, preflight, cleanup
+    )
+    _, second_mapping = executor._open_workspace_project_browser(
+        second_config, ["oracle"], second_config.copy_profile, 43124, preflight, cleanup
+    )
+
+    assert first_mapping["url"] == "https://chatgpt.com/g/g-p-session-shared/project"
+    assert second_mapping["url"] == first_mapping["url"]
+    assert [bootstrap is not None for _, bootstrap in calls] == [True, False, False]

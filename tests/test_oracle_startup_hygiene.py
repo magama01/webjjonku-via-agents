@@ -103,6 +103,482 @@ assert.equal(hidden,PLATFORM==='darwin'?1:0);
     assert result.returncode == 0, result.stderr
 
 
+def test_workspace_project_create_selector_is_scoped_unique_and_fail_closed() -> None:
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node unavailable')
+    module = (ROOT / 'bin/oracle_temporary_personalization_preflight.mjs').as_uri()
+    script = r"""
+import assert from 'node:assert/strict';
+const {selectWorkspaceProjectCreateTrigger} = await import(MODULE);
+class Element {
+  constructor(tagName, {text='', attrs={}, visible=true, disabled=false}={}) {
+    this.tagName=tagName.toUpperCase();this.innerText=text;this.textContent=text;this.attrs={...attrs};
+    this.visible=visible;this.disabled=disabled;this.isConnected=true;this.parentElement=null;this.children=[];
+  }
+  append(...children){for(const child of children){child.parentElement=this;this.children.push(child);}return this;}
+  getClientRects(){return this.visible?[1]:[];}
+  getAttribute(name){return Object.prototype.hasOwnProperty.call(this.attrs,name)?this.attrs[name]:null;}
+  querySelector(selector){return this.querySelectorAll(selector)[0]??null;}
+  querySelectorAll(selector){
+    const selectors=selector.split(',').map(value=>value.trim());
+    const matches=(element, part)=>part==='button'?element.tagName==='BUTTON':
+      part==='div'?element.tagName==='DIV':part==='span'?element.tagName==='SPAN':part==='p'?element.tagName==='P':
+      part==='h2'?element.tagName==='H2':part==='h3'?element.tagName==='H3':part==='svg'?element.tagName==='SVG':
+      part==='[role="button"]'?element.getAttribute('role')==='button':
+      part==='[role="menuitem"]'?element.getAttribute('role')==='menuitem':
+      part==='[data-icon]'?element.getAttribute('data-icon')!==null:
+      part==='[class*="icon"]'?String(element.getAttribute('class')??'').includes('icon'):false;
+    const found=[];
+    const visit=element=>{for(const child of element.children){if(selectors.some(part=>matches(child,part)))found.push(child);visit(child);}};
+    visit(this);return found;
+  }
+}
+const el=(tag,options)=>new Element(tag,options);
+const projectsTree=({icons=1, exact=[], hiddenIcon=false, outsideIcon=false, sidebar=true, newChat=false}={})=>{
+  const root=el('main');
+  for(const label of exact) root.append(el('button',{text:label}));
+  const side=el(sidebar?'nav':'section',{attrs:sidebar?{'aria-label':'Sidebar'}:{}});
+  const section=el('section'), header=el('div'), heading=el('h2',{text:'Projects'});
+  header.append(heading);
+  for(let index=0;index<icons;index+=1) header.append(el('button').append(el('svg')));
+  if(hiddenIcon) header.append(el('button',{visible:false}).append(el('svg')));
+  if(newChat) header.append(el('button',{text:'New chat'}));
+  section.append(header,el('a',{text:'Existing Project',attrs:{role:'button'}}));side.append(section);
+  if(outsideIcon) side.append(el('button').append(el('svg')));
+  root.append(side);
+  return {root, header};
+};
+let fixture=projectsTree({icons:1,exact:['Create project']});
+assert.equal(selectWorkspaceProjectCreateTrigger(fixture.root).innerText,'Create project','exact label must win over icon fallback');
+fixture=projectsTree({icons:1,hiddenIcon:true,outsideIcon:true});
+assert.equal(selectWorkspaceProjectCreateTrigger(fixture.root),fixture.header.children[1],'unique visible Projects icon should be selected');
+fixture=projectsTree({icons:2});
+assert.equal(selectWorkspaceProjectCreateTrigger(fixture.root),null,'multiple visible icon candidates must fail closed');
+fixture=projectsTree({icons:1,sidebar:false});
+assert.equal(selectWorkspaceProjectCreateTrigger(fixture.root),null,'icon fallback must stay inside the sidebar');
+fixture=projectsTree({icons:0,newChat:true,outsideIcon:true});
+assert.equal(selectWorkspaceProjectCreateTrigger(fixture.root),null,'new-chat and unrelated sidebar icons must not be Project create controls');
+fixture=projectsTree({icons:1,exact:['New project','Create project']});
+assert.equal(selectWorkspaceProjectCreateTrigger(fixture.root),null,'ambiguous exact controls must not fall back to an icon');
+""".replace('MODULE', json.dumps(module))
+    result = subprocess.run([node, '--input-type=module', '-e', script], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+
+
+def test_workspace_project_bootstrap_waits_for_hydration_and_fails_closed() -> None:
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node unavailable')
+    module = (ROOT / 'bin/oracle_temporary_personalization_preflight.mjs').as_uri()
+    script = r"""
+import assert from 'node:assert/strict';
+const {ensureWorkspaceProject} = await import(MODULE);
+const project='https://chatgpt.com/g/g-p-hydrated123/project';
+const realSetTimeout=globalThis.setTimeout;
+globalThis.setTimeout=resolve=>{queueMicrotask(resolve);return 1;};
+class Element {
+  constructor(tagName,{text='',attrs={},visible=true,href=null,disabled=false}={}) {
+    this.tagName=tagName.toUpperCase();this.innerText=text;this.textContent=text;this.attrs={...attrs};
+    this.visible=visible;this.href=href;this.disabled=disabled;this.isConnected=true;this.parentElement=null;
+    this.children=[];this.placeholder='';this.onClick=null;
+  }
+  append(...children){for(const child of children){child.parentElement=this;this.children.push(child);}return this;}
+  getClientRects(){return this.visible?[1]:[];}
+  getAttribute(name){return Object.prototype.hasOwnProperty.call(this.attrs,name)?this.attrs[name]:null;}
+  querySelector(selector){return this.querySelectorAll(selector)[0]??null;}
+  querySelectorAll(){return [];}
+  scrollIntoView(){}
+  click(){this.onClick?.();}
+  focus(){}
+  dispatchEvent(){return true;}
+}
+class TestInput extends Element {
+  constructor(){super('input',{attrs:{'aria-label':'Project name'}});this.type='text';this._value='';}
+}
+Object.defineProperty(TestInput.prototype,'value',{get(){return this._value;},set(value){this._value=String(value);}});
+globalThis.HTMLInputElement=TestInput;
+globalThis.HTMLTextAreaElement=class extends Element {};
+globalThis.InputEvent=globalThis.Event;
+const Runtime={evaluate:async({expression})=>({result:{value:await eval(expression)}})};
+const bootstrap={name:'Hydrated Project',instructions:'keep exact workspace instructions'};
+const setLocation=href=>{const url=new URL(href);globalThis.location={origin:url.origin,pathname:url.pathname,search:url.search,hash:url.hash,href:url.href};};
+const resetLocation=()=>setLocation('https://chatgpt.com/');
+const existingProjectDocument=()=>({querySelectorAll(selector){
+  if(selector==='a,button') return [];
+  if(selector==='a[href]') return [new Element('a',{text:bootstrap.name,href:project})];
+  return [];
+}});
+
+for(const invalidHome of [project,'https://chatgpt.com/c/not-home?temporary-chat=true']){
+  setLocation(invalidHome);globalThis.document=existingProjectDocument();
+  await assert.rejects(
+    ensureWorkspaceProject(Runtime,bootstrap),
+    error=>error.code==='WORKSPACE_PROJECT_URL_UNCONFIRMED',
+    `non-home bootstrap URL must fail closed: ${invalidHome}`,
+  );
+}
+
+resetLocation();
+let triggerScans=0,dialogVisible=false;
+const trigger=new Element('button',{text:'New project'});
+const input=new TestInput();
+const create=new Element('button',{text:'Create'});
+const dialog=new Element('div');
+dialog.querySelectorAll=selector=>selector==='input'?[input]:selector==='button,[role="button"],[role="menuitem"]'?[create]:[];
+trigger.onClick=()=>{dialogVisible=true;};
+create.onClick=()=>{location.pathname='/g/g-p-hydrated123/project';location.href=project;};
+globalThis.document={querySelectorAll(selector){
+  if(selector==='a,button'||selector==='a[href]') return [];
+  if(selector==='button,[role="button"],[role="menuitem"]') return ++triggerScans>=3?[trigger]:[];
+  if(selector==='div,span,p,h2,h3') return [];
+  if(selector==='[role="dialog"]') return dialogVisible?[dialog]:[];
+  return [];
+}};
+const hydrated=await ensureWorkspaceProject(Runtime,bootstrap);
+assert.deepEqual(hydrated,{url:project,created:true});
+assert.ok(triggerScans>=3,'create trigger must be re-discovered after hydration');
+assert.equal(input.value,bootstrap.name);
+
+resetLocation();
+let popoverVisible=false;
+const popoverTrigger=new Element('button',{text:'New project'});
+const popoverInput=new TestInput();
+const popoverCreate=new Element('button',{text:'Create project'});
+const popover=new Element('div',{attrs:{popover:''}});
+popover.querySelectorAll=selector=>selector==='input'?[popoverInput]:selector==='button,[role="button"],[role="menuitem"]'?[popoverCreate]:[];
+popoverTrigger.onClick=()=>{popoverVisible=true;};
+popoverCreate.onClick=()=>{location.pathname='/g/g-p-hydrated123/project';location.href=project;};
+globalThis.document={querySelectorAll(selector){
+  if(selector==='a,button'||selector==='a[href]'||selector==='label'||selector==='[role="dialog"]') return [];
+  if(selector==='button,[role="button"],[role="menuitem"]') return [popoverTrigger];
+  if(selector==='div,span,p,h2,h3') return [];
+  if(selector.includes('[popover]')) return popoverVisible?[popover]:[];
+  return [];
+}};
+const popoverResult=await ensureWorkspaceProject(Runtime,bootstrap);
+assert.deepEqual(popoverResult,{url:project,created:true},'non-dialog popover must be supported');
+assert.equal(popoverInput.value,bootstrap.name);
+
+resetLocation();
+let ambiguousVisible=false;
+const ambiguousTrigger=new Element('button',{text:'New project'});
+const ambiguousCreate=new Element('button',{text:'Create'});
+const ambiguousOne=new TestInput();
+const ambiguousTwo=new TestInput();
+ambiguousTwo.attrs['aria-label']='Name';
+const ambiguousPopover=new Element('div',{attrs:{popover:''}});
+ambiguousPopover.querySelectorAll=selector=>selector==='input'?[ambiguousOne,ambiguousTwo]:selector==='button,[role="button"],[role="menuitem"]'?[ambiguousCreate]:[];
+ambiguousTrigger.onClick=()=>{ambiguousVisible=true;};
+globalThis.document={querySelectorAll(selector){
+  if(selector==='a,button'||selector==='a[href]'||selector==='label'||selector==='[role="dialog"]') return [];
+  if(selector==='button,[role="button"],[role="menuitem"]') return [ambiguousTrigger];
+  if(selector==='div,span,p,h2,h3') return [];
+  if(selector.includes('[popover]')) return ambiguousVisible?[ambiguousPopover]:[];
+  return [];
+}};
+await assert.rejects(
+  ensureWorkspaceProject(Runtime,bootstrap),
+  error=>error.code==='WORKSPACE_PROJECT_CREATE_FAILED'&&error.message==='Project name input is missing or ambiguous',
+  'multiple Project/name inputs must fail closed',
+);
+
+resetLocation();
+const timeoutTrigger=new Element('button',{text:'New project'});
+const unrelatedBodyInput=new TestInput();
+unrelatedBodyInput.attrs['aria-label']='Name';
+globalThis.document={querySelectorAll(selector){
+  if(selector==='a,button'||selector==='a[href]'||selector==='label'||selector==='[role="dialog"]') return [];
+  if(selector==='button,[role="button"],[role="menuitem"]') return [timeoutTrigger];
+  if(selector==='div,span,p,h2,h3') return [];
+  if(selector==='input') return [unrelatedBodyInput];
+  return [];
+}};
+await assert.rejects(
+  ensureWorkspaceProject(Runtime,bootstrap),
+  error=>error.code==='WORKSPACE_PROJECT_CREATE_FAILED'&&error.message==='Project creation surface did not appear',
+  'missing creation surface must time out without using an unrelated body input',
+);
+
+resetLocation();
+globalThis.document={querySelectorAll:()=>[]};
+await assert.rejects(
+  ensureWorkspaceProject(Runtime,bootstrap),
+  error=>error.code==='WORKSPACE_PROJECT_CREATE_FAILED'&&error.message==='New Project control is missing or ambiguous',
+);
+
+resetLocation();
+const duplicate=()=>new Element('a',{text:bootstrap.name,href:project});
+const duplicateProject='https://chatgpt.com/g/g-p-duplicate-new/project';
+let duplicateDialogVisible=false,duplicateTriggerClicks=0;
+const duplicateTrigger=new Element('button',{text:'New project'});
+const duplicateInput=new TestInput();
+const duplicateCreate=new Element('button',{text:'Create'});
+const duplicateDialog=new Element('div');
+duplicateDialog.querySelectorAll=selector=>selector==='input'?[duplicateInput]:selector==='button,[role="button"],[role="menuitem"]'?[duplicateCreate]:[];
+duplicateTrigger.onClick=()=>{duplicateTriggerClicks++;duplicateDialogVisible=true;};
+duplicateCreate.onClick=()=>setLocation(duplicateProject);
+globalThis.document={querySelectorAll(selector){
+  if(selector==='a,button') return [];
+  if(selector==='a[href]') return [duplicate(),duplicate()];
+  if(selector==='button,[role="button"],[role="menuitem"]') return [duplicateTrigger];
+  if(selector==='div,span,p,h2,h3'||selector==='label') return [];
+  if(selector==='[role="dialog"]') return duplicateDialogVisible?[duplicateDialog]:[];
+  return [];
+}};
+assert.deepEqual(
+  await ensureWorkspaceProject(Runtime,bootstrap),
+  {url:duplicateProject,created:true},
+  'same-name existing Projects must not block creation of a new session Project',
+);
+assert.equal(duplicateTriggerClicks,1);
+assert.equal(duplicateInput.value,bootstrap.name);
+globalThis.setTimeout=realSetTimeout;
+""".replace('MODULE', json.dumps(module))
+    result = subprocess.run([node, '--input-type=module', '-e', script], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+
+
+def test_workspace_project_bootstrap_ignores_existing_rows_and_captures_new_project_url() -> None:
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node unavailable')
+    module = (ROOT / 'bin/oracle_temporary_personalization_preflight.mjs').as_uri()
+    script = r"""
+import assert from 'node:assert/strict';
+const {ensureWorkspaceProject} = await import(MODULE);
+const bootstrap={name:'complex-services-api',instructions:'preserve exact project instructions'};
+const oldA='https://chatgpt.com/g/g-p-old-a/project';
+const oldB='https://chatgpt.com/g/g-p-old-b/project';
+const created='https://chatgpt.com/g/g-p-new-session/project';
+const realSetTimeout=globalThis.setTimeout;
+globalThis.setTimeout=resolve=>{queueMicrotask(resolve);return 1;};
+class Element {
+  constructor(tagName,{text='',attrs={},visible=true,href=null,disabled=false}={}) {
+    this.tagName=tagName.toUpperCase();this.innerText=text;this.textContent=text;this.attrs={...attrs};
+    this.visible=visible;this.href=href;this.disabled=disabled;this.isConnected=true;this.parentElement=null;
+    this.children=[];this.placeholder='';this.onClick=null;
+  }
+  append(...children){for(const child of children){child.parentElement=this;this.children.push(child);}return this;}
+  getClientRects(){return this.visible?[1]:[];}
+  getAttribute(name){return Object.prototype.hasOwnProperty.call(this.attrs,name)?this.attrs[name]:null;}
+  querySelectorAll(){return [];}
+  scrollIntoView(){}
+  click(){this.onClick?.();}
+  focus(){}
+  dispatchEvent(){return true;}
+}
+class TestInput extends Element {
+  constructor(){super('input',{attrs:{'aria-label':'Project name'}});this.type='text';this._value='';}
+}
+Object.defineProperty(TestInput.prototype,'value',{get(){return this._value;},set(value){this._value=String(value);}});
+globalThis.HTMLInputElement=TestInput;
+globalThis.HTMLTextAreaElement=class extends Element {};
+globalThis.InputEvent=globalThis.Event;
+const setLocation=href=>{const url=new URL(href);globalThis.location={origin:url.origin,pathname:url.pathname,search:url.search,hash:url.hash,href:url.href};};
+setLocation('https://chatgpt.com/');
+const Runtime={evaluate:async({expression})=>({result:{value:await eval(expression)}})};
+const existing=[
+  new Element('a',{text:bootstrap.name,href:oldA}),
+  new Element('a',{text:bootstrap.name,href:oldB}),
+];
+const createdLink=new Element('a',{text:bootstrap.name,href:created});
+let dialogVisible=false,createdVisible=false,triggerClicks=0;
+const trigger=new Element('button',{text:'New project'});
+const input=new TestInput();
+const create=new Element('button',{text:'Create'});
+const dialog=new Element('div');
+dialog.querySelectorAll=selector=>selector==='input'?[input]:selector==='button,[role="button"],[role="menuitem"]'?[create]:[];
+trigger.onClick=()=>{triggerClicks++;dialogVisible=true;};
+create.onClick=()=>{createdVisible=true;};
+globalThis.document={querySelectorAll(selector){
+  if(selector==='a,button') return [];
+  if(selector==='a[href]') return createdVisible?[...existing,createdLink]:existing;
+  if(selector==='button,[role="button"],[role="menuitem"]') return [trigger];
+  if(selector==='div,span,p,h2,h3'||selector==='label') return [];
+  if(selector==='[role="dialog"]') return dialogVisible?[dialog]:[];
+  return [];
+}};
+const result=await ensureWorkspaceProject(Runtime,bootstrap);
+assert.deepEqual(result,{url:created,created:true});
+assert.equal(triggerClicks,1,'existing same-name Projects must not be reused');
+assert.equal(input.value,bootstrap.name);
+assert.equal(location.href,'https://chatgpt.com/','new Project URL fallback should not require navigation when one new Project ID appears');
+globalThis.setTimeout=realSetTimeout;
+""".replace('MODULE', json.dumps(module))
+    result = subprocess.run([node, '--input-type=module', '-e', script], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+
+
+def test_workspace_project_bootstrap_waits_for_runtime_document_readiness() -> None:
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node unavailable')
+    module = (ROOT / 'bin/oracle_temporary_personalization_preflight.mjs').as_uri()
+    script = r"""
+import assert from 'node:assert/strict';
+const {startPersonalizedBrowser} = await import(MODULE);
+const start='https://chatgpt.com/';
+const project='https://chatgpt.com/g/g-p-ready123/project';
+let current=start,pages=[{id:'owned',type:'page',url:start}],hrefReads=0,readyReads=0,resolverCalls=0;
+const client={
+ Page:{enable:async()=>{},navigate:async({url})=>{current=url;pages[0].url=url;}},
+ Runtime:{enable:async()=>{},evaluate:async({expression})=>{
+   if(expression==='location.href'){
+     hrefReads++;
+     return {result:{value:current===start&&hrefReads<=2?'about:blank':current}};
+   }
+   if(expression==='document.readyState') return {result:{value:++readyReads>=2?'complete':'loading'}};
+   return {result:{value:current}};
+ }},
+ close:async()=>{},Input:{},Emulation:{setFocusEmulationEnabled:async()=>{}}
+};
+class Launcher {constructor(){this.port=12345;this.pid=321;} async launch(){} kill(){}}
+const deps={Launcher,pause:async()=>{},
+ jsonAt:async(port,resource)=>resource==='list'?pages:{webSocketDebuggerUrl:'ws://127.0.0.1:12345/devtools/browser/exact'},
+ lifecycle:{buildChromeFlagsForTest:()=>[],resolveChromeLaunchOptionsForTest:flags=>({chromeFlags:flags,ignoreDefaultFlags:true}),
+  connectToRemoteChromeTarget:async()=>({client,targetId:'owned'}),closeBlankChromeTabs:async()=>{}},
+ ensureWorkspaceProject:async()=>{resolverCalls++;assert.ok(hrefReads>=3);assert.ok(readyReads>=2);return {url:project,created:false};},
+ ensureWorkspaceProjectInstructions:async()=>({ok:true,changed:false,verified:true}),
+ ensurePromptReady:async()=>{},ensureChatMode:async()=>{},ensureTemporaryChatPersonalization:async()=>{}
+};
+const bootstrap={name:'complex-services-api',instructions:'instructions'};
+const session=await startPersonalizedBrowser({port:12345,url:start,profilePath:'owned-copy',platform:'linux',projectBootstrap:bootstrap},deps);
+assert.equal(resolverCalls,1);assert.equal(session.evidence.project_url,project);
+
+current=start;pages=[{id:'owned',type:'page',url:start}];resolverCalls=0;
+const neverReadyClient={...client,Runtime:{enable:async()=>{},evaluate:async({expression})=>({result:{value:expression==='location.href'?'about:blank':'loading'}})}};
+const neverReadyDeps={...deps,lifecycle:{...deps.lifecycle,connectToRemoteChromeTarget:async()=>({client:neverReadyClient,targetId:'owned'})}};
+await assert.rejects(
+  startPersonalizedBrowser({port:12345,url:start,profilePath:'owned-copy',platform:'linux',projectBootstrap:bootstrap,startupTimeoutMs:1000},neverReadyDeps),
+  error=>error.code==='WORKSPACE_PROJECT_URL_UNCONFIRMED',
+  'runtime document wait must be bounded and fail before Project resolution',
+);
+assert.equal(resolverCalls,0);
+""".replace('MODULE', json.dumps(module))
+    result = subprocess.run([node, '--input-type=module', '-e', script], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+
+
+def test_workspace_project_instructions_are_best_effort_but_project_url_is_not() -> None:
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node unavailable')
+    module = (ROOT / 'bin/oracle_temporary_personalization_preflight.mjs').as_uri()
+    script = r"""
+import assert from 'node:assert/strict';
+const {ensureWorkspaceProjectInstructions} = await import(MODULE);
+const bootstrap={name:'project',instructions:'required project instructions'};
+const logs=[];
+const success=await ensureWorkspaceProjectInstructions({evaluate:async()=>({result:{value:{ok:true,changed:true,verified:true}}})},bootstrap,message=>logs.push(message));
+assert.deepEqual(success,{ok:true,changed:true,verified:true});
+assert.match(logs.at(-1),/updated and verified/);
+const unavailable=await ensureWorkspaceProjectInstructions({evaluate:async()=>({result:{value:{
+ ok:false,code:'WORKSPACE_PROJECT_INSTRUCTIONS_FAILED',error:'Project instructions editor is missing or ambiguous'
+}}})},bootstrap,message=>logs.push(message));
+assert.equal(unavailable.ok,true);assert.equal(unavailable.verified,false);assert.equal(unavailable.changed,false);
+assert.deepEqual(unavailable.warning,{
+ code:'WORKSPACE_PROJECT_INSTRUCTIONS_FAILED',error:'Project instructions editor is missing or ambiguous'
+});
+assert.match(logs.at(-1),/continuing with the exact Project URL/);
+await assert.rejects(
+ ensureWorkspaceProjectInstructions({evaluate:async()=>({result:{value:{
+  ok:false,code:'WORKSPACE_PROJECT_URL_UNCONFIRMED',error:'Not on the confirmed ChatGPT Project page'
+ }}})},bootstrap),
+ error=>error.code==='WORKSPACE_PROJECT_URL_UNCONFIRMED',
+);
+""".replace('MODULE', json.dumps(module))
+    result = subprocess.run([node, '--input-type=module', '-e', script], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize('platform', ['darwin', 'win32', 'linux'])
+def test_workspace_project_bootstrap_stays_headed_until_owned_cleanup(platform: str) -> None:
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node unavailable')
+    module = (ROOT / 'bin/oracle_temporary_personalization_preflight.mjs').as_uri()
+    script = r"""
+import assert from 'node:assert/strict';
+const {startPersonalizedBrowser} = await import(MODULE);
+const start='https://chatgpt.com/?temporary-chat=true#bootstrap';
+const project='https://chatgpt.com/g/g-p-owned123/project';
+let current=start, hideFlag, hidden=0, wroteInstructions=0, personalized=0;
+let pages=[{id:'owned',type:'page',url:start}];
+const client={
+ Page:{enable:async()=>{},navigate:async({url})=>{current=url;pages[0].url=url;}},
+ Runtime:{enable:async()=>{},evaluate:async({expression})=>({result:{value:expression==='document.readyState'?'complete':current}})},
+ close:async()=>{},Input:{},Emulation:{setFocusEmulationEnabled:async()=>{}}
+};
+class Launcher {constructor(options){this.options=options;this.port=12345;this.pid=321;} async launch(){} kill(){}}
+const deps={Launcher,pause:async()=>{},
+ jsonAt:async(port,resource)=>resource==='list'?pages:{webSocketDebuggerUrl:'ws://127.0.0.1:12345/devtools/browser/exact'},
+ lifecycle:{
+  buildChromeFlagsForTest:(headless,debug,hide)=>{hideFlag=hide;return [];},
+  resolveChromeLaunchOptionsForTest:flags=>({chromeFlags:flags,ignoreDefaultFlags:true}),
+  positionChromeWindowOffscreen:async()=>{hidden++;},
+  connectToRemoteChromeTarget:async()=>({client,targetId:'owned'}),closeBlankChromeTabs:async()=>{}
+ },
+ ensureWorkspaceProject:async(Runtime,bootstrap)=>{assert.equal(bootstrap.name,'project');return {url:project,created:true};},
+ ensureWorkspaceProjectInstructions:async(Runtime,bootstrap)=>{assert.match(bootstrap.instructions,/AGENTS\.md/);wroteInstructions++;return {ok:true,changed:true,verified:true};},
+ ensurePromptReady:async()=>{},ensureChatMode:async()=>{},ensureTemporaryChatPersonalization:async()=>{personalized++;}
+};
+const projectBootstrap={name:'project',instructions:'한국어 AGENTS.md DevSpace /workspace'};
+await assert.rejects(
+  startPersonalizedBrowser({port:12345,url:project,profilePath:'owned-copy',platform:PLATFORM,projectBootstrap},deps),
+  error=>error.code==='WORKSPACE_PROJECT_BOOTSTRAP_INVALID',
+  'Project bootstrap must reject a non-home Project path instead of falling back quietly',
+);
+const session=await startPersonalizedBrowser({port:12345,url:start,profilePath:'owned-copy',platform:PLATFORM,projectBootstrap},deps);
+assert.equal(hideFlag,false);assert.equal(hidden,0);assert.equal(wroteInstructions,1);assert.equal(personalized,0);
+assert.equal(session.evidence.project_url,project);assert.equal(session.evidence.project_created,true);assert.equal(session.evidence.instructions_verified,true);
+assert.equal(session.evidence.conversation_url,project);assert.equal(session.evidence.personalization,'not-applicable');assert.equal(current,project);
+current=start;pages[0].url=start;
+deps.ensureWorkspaceProjectInstructions=async(Runtime,bootstrap)=>{assert.match(bootstrap.instructions,/AGENTS\.md/);wroteInstructions++;return {
+ ok:true,changed:false,verified:false,warning:{code:'WORKSPACE_PROJECT_INSTRUCTIONS_FAILED',error:'Project instructions save action is unavailable'}
+};};
+const unavailable=await startPersonalizedBrowser({port:12345,url:start,profilePath:'owned-copy',platform:PLATFORM,projectBootstrap},deps);
+assert.equal(wroteInstructions,2);assert.equal(personalized,0);assert.equal(unavailable.evidence.instructions_verified,false);
+assert.deepEqual(unavailable.evidence.instructions_warning,{code:'WORKSPACE_PROJECT_INSTRUCTIONS_FAILED',error:'Project instructions save action is unavailable'});
+assert.equal(unavailable.evidence.project_url,project);assert.equal(unavailable.evidence.conversation_url,project);assert.equal(current,project);
+""".replace('MODULE', json.dumps(module)).replace('PLATFORM', json.dumps(platform))
+    result = subprocess.run([node, '--input-type=module', '-e', script], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize('platform', ['darwin', 'win32', 'linux'])
+def test_workspace_project_run_uses_exact_url_without_temporary_personalization(platform: str) -> None:
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node unavailable')
+    module = (ROOT / 'bin/oracle_temporary_personalization_preflight.mjs').as_uri()
+    script = r"""
+import assert from 'node:assert/strict';
+const {startPersonalizedBrowser} = await import(MODULE);
+const project='https://chatgpt.com/g/g-p-owned123/project';
+let pages=[{id:'owned',type:'page',url:project}], personalized=0, promptChecks=0, hidden=0, hideFlag;
+const client={Page:{enable:async()=>{}},Runtime:{enable:async()=>{},evaluate:async()=>({result:{value:project}})},
+ close:async()=>{},Input:{},Emulation:{setFocusEmulationEnabled:async()=>{}}};
+class Launcher {constructor(options){this.options=options;this.port=12345;this.pid=321;} async launch(){} kill(){}}
+const deps={Launcher,pause:async()=>{},
+ jsonAt:async(port,resource)=>resource==='list'?pages:{webSocketDebuggerUrl:'ws://127.0.0.1:12345/devtools/browser/exact'},
+ lifecycle:{
+  buildChromeFlagsForTest:(headless,debug,hide)=>{hideFlag=hide;return [];},
+  resolveChromeLaunchOptionsForTest:flags=>({chromeFlags:flags,ignoreDefaultFlags:true}),
+  positionChromeWindowOffscreen:async()=>{hidden++;},
+  connectToRemoteChromeTarget:async()=>({client,targetId:'owned'}),closeBlankChromeTabs:async()=>{}
+ },
+ ensurePromptReady:async()=>{promptChecks++;},ensureChatMode:async()=>{},ensureTemporaryChatPersonalization:async()=>{personalized++;}
+};
+const session=await startPersonalizedBrowser({port:12345,url:project,profilePath:'owned-copy',platform:PLATFORM},deps);
+assert.equal(hideFlag,true);assert.equal(hidden,PLATFORM==='darwin'?1:0);assert.ok(promptChecks>=2);assert.equal(personalized,0);
+assert.equal(session.evidence.project_url,project);assert.equal(session.evidence.conversation_url,project);
+assert.equal(session.evidence.personalization,'not-applicable');assert.equal(session.evidence.target_id,'owned');
+""".replace('MODULE', json.dumps(module)).replace('PLATFORM', json.dumps(platform))
+    result = subprocess.run([node, '--input-type=module', '-e', script], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize('mismatch', ['none', 'browser', 'target', 'url', 'extra-page'])
 def test_browser_close_checks_exact_identity_and_tabs(mismatch: str) -> None:
     node = shutil.which('node')

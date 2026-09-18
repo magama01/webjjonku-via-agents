@@ -5589,6 +5589,87 @@ def test_direct_execute_keeps_default_selection_when_flags_are_omitted(
     assert observed["app_name"] == runner.EXECUTOR.DEFAULT_APP_NAME
 
 
+def test_direct_execute_passes_explicit_session_id(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runner = load_runner()
+    observed: dict[str, object] = {}
+
+    def make_config(**kwargs):
+        observed.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(runner.EXECUTOR, "make_config", make_config)
+    monkeypatch.setattr(
+        runner.EXECUTOR,
+        "execute_config",
+        lambda config, *, dry_run: {"ok": True, "status": "dry-run"},
+    )
+
+    exit_code = runner.main([
+        "execute",
+        "--project-root", "project",
+        "--mission-path", "mission.md",
+        "--session-id", "my-custom-session-123",
+        "--dry-run",
+    ])
+    assert exit_code == 0
+    assert observed["session_id"] == "my-custom-session-123"
+
+
+@pytest.mark.parametrize(
+    ("env_var", "value"),
+    [
+        ("WEBJJONKU_SESSION_ID", "jjonku-session-001"),
+        ("CODEX_SESSION_ID", "codex-session-002"),
+        ("AGY_CONVERSATION_ID", "agy-conv-003"),
+        ("ANTIGRAVITY_CONVERSATION_ID", "antigravity-conv-004"),
+        ("CLAUDE_CONVERSATION_ID", "claude-conv-005"),
+        ("CLAUDE_SESSION_ID", "claude-sess-006"),
+    ],
+)
+def test_direct_execute_detects_agent_session_id_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    env_var: str,
+    value: str,
+) -> None:
+    runner = load_runner()
+    observed: dict[str, object] = {}
+
+    for var in (
+        "WEBJJONKU_SESSION_ID",
+        "CODEX_SESSION_ID",
+        "AGY_CONVERSATION_ID",
+        "ANTIGRAVITY_CONVERSATION_ID",
+        "CLAUDE_CONVERSATION_ID",
+        "CLAUDE_SESSION_ID",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv(env_var, value)
+
+    def make_config(**kwargs):
+        observed.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(runner.EXECUTOR, "make_config", make_config)
+    monkeypatch.setattr(
+        runner.EXECUTOR,
+        "execute_config",
+        lambda config, *, dry_run: {"ok": True, "status": "dry-run"},
+    )
+
+    exit_code = runner.main([
+        "execute",
+        "--project-root", "project",
+        "--mission-path", "mission.md",
+        "--dry-run",
+    ])
+    assert exit_code == 0
+    assert observed["session_id"] == value
+
+
 def test_live_recovery_reopens_only_the_exact_slug_after_each_status_audit(
     tmp_path: Path,
 ) -> None:
