@@ -1565,6 +1565,7 @@ def test_observation_deadline_terminates_hung_oracle(executor, execution_paths, 
     assert state["status"] == "attention_required"
     assert state["error_code"] == "OBSERVATION_TIMEOUT"
     assert state["failure_stage"] == "observation-timeout"
+    assert state["error_evidence"]["remaining_seconds"] <= 1.0
     assert state["phase"] == "submission_unknown"
     assert state["observation"]["budget_seconds"] == 1.0
 
