@@ -4284,10 +4284,13 @@ def build_parser() -> argparse.ArgumentParser:
     execute_parser.add_argument("--model", choices=EXECUTOR.SUPPORTED_MODELS)
     execute_parser.add_argument("--effort", choices=(*EXECUTOR.SUPPORTED_EFFORTS, *EXECUTOR.EFFORT_ALIASES))
     execute_parser.add_argument("--app-name")
+    execute_parser.add_argument("--brief", action="store_true", help="return only the fields an agent needs to decide the next step")
     execute_parser.add_argument("--dry-run", action="store_true")
     reconnect_parser = commands.add_parser("reconnect", help="prompt-free continuation of one ordinary run")
     reconnect_parser.add_argument("--run-dir", type=Path, required=True)
     reconnect_parser.add_argument("--dry-run", action="store_true")
+    reconnect_parser.add_argument("--session-id", help="session identifier that owns the run (or set the session env var)")
+    reconnect_parser.add_argument("--brief", action="store_true", help="return only the fields an agent needs to decide the next step")
     followup_parser = commands.add_parser("followup")
     followup_parser.add_argument("--parent-run-dir", type=Path, required=True)
     followup_parser.add_argument("--mission-path", type=Path, required=True)
@@ -4467,7 +4470,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 payload = EXECUTOR.execute_config(config, dry_run=args.dry_run)
         elif args.command == "reconnect":
-            payload = EXECUTOR.reconnect_run(args.run_dir, dry_run=args.dry_run)
+            payload = EXECUTOR.reconnect_run(
+                args.run_dir, dry_run=args.dry_run, session_id=_detect_session_id(args.session_id)
+            )
         elif args.command == "followup":
             payload = followup_run(
                 args.parent_run_dir,
@@ -4580,6 +4585,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         payload = exc.envelope()
     except Exception as exc:
         payload = OracleRunError("ORACLE_RUN_FAILED", str(exc)).envelope()
+    if getattr(args, "brief", False):
+        payload = EXECUTOR.brief_result(payload)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0 if payload.get("ok") else 1
 

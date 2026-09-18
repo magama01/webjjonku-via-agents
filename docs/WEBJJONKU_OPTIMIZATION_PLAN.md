@@ -173,3 +173,9 @@
 실환경 검증은 Codex·Claude·agy 각각에서 작은 읽기 전용 미션 하나를 실행하고 비어 있지 않은 결과를 회수함. 같은 세션의 두 번째 미션과 다른 세션의 새 미션으로 Project 재사용/분리를 확인함. dry-run과 프로세스 종료 코드만으로 실환경 통과를 선언하지 않음.
 
 배포 완료 보고에는 소스 변경, 설치본 일치 여부, 실제 사용 경로, 실환경 검증 범위를 명시함. 테스트 성공이 설치나 공개 배포 완료를 뜻하지 않음.
+
+## 진행 상태 (2026-09-18)
+
+- 완료: 실행 경로·배포 정리(`CODEX_HOME` 기준, skills CLI 배포), 기본 모델 `gpt-5.6-sol`/`extended`(High)와 Sol 3단계 슬라이더 검증, session_id 해시 키와 legacy 키 호환, 다른 세션의 reconnect 거부(`FOREIGN_SESSION_RUN`), 관찰 예산(`observation.deadline`, 재연결 최대 2회, `OBSERVATION_TIMEOUT`), `--brief` 반환과 `phase` 분류, `timeline` 계측.
+- 실환경: Sol/High 읽기 미션 1회 `captured` 확인. 같은 session_id 재실행이 같은 Project를 재사용하는 것은 dry-run으로 확인.
+- 남음: CDP/renderer 생존 점검(30초 간격, 3회 실패 시 복구)은 미구현 — 현재는 프로세스 종료 시한만 강제함. hidden-window 초점 측정, Project 메모리 격리 확인, 브라우저 시작 재사용, 병렬.

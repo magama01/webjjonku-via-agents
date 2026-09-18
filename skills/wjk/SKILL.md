@@ -36,12 +36,19 @@ git clone https://github.com/magama01/webjjonku-via-agents.git && cd webjjonku-v
      --mission-path "<project-root>/.codex-tmp/web-mission.md" \
      --session-id "$WEBJJONKU_SESSION_ID" \
      --model gpt-5.6-sol \
-     --effort extended \
+     --effort high \
+     --brief \
      --dry-run
    ```
    통과하면 `--dry-run`만 빼고 같은 명령을 `run_in_background`로 실행함. 완료 알림을 기다림. 상태 폴링 반복·로그 전체 읽기·미션 재제출 금지.
-4. 결과: run 디렉터리의 `output.md`를 읽고 짧은 결론 + 결과 경로를 보고함. `output.md`가 없거나 비어 있으면 완료로 취급하지 않음.
-5. 대기 중 끊기면 새 실행 대신 `reconnect --run-dir "<run-dir>"`.
+   `--brief`는 `run_id, status, phase, output, verified, error, next_action`만 돌려줌. 전체 상태는 run 디렉터리 `state.json`에 있음.
+4. 결과: `phase == captured`이면 `output`(run 디렉터리의 `output.md`)을 읽고 짧은 결론 + 결과 경로를 보고함. `output.md`가 없거나 비어 있으면 완료로 취급하지 않음.
+5. `phase`가 `submission_unknown` / `awaiting_response`이면 `next_action`대로 새 실행 대신 재연결함. 실행 전체에 관찰 예산(기본 110분, 재연결 최대 2회)이 있고 재연결해도 초기화되지 않음. 예산 소진 시 `next_action`이 수동 확인을 요구하면 `conversation_url`을 사용자에게 보고하고 멈춤.
+   ```bash
+   python3 "${CODEX_HOME:-$HOME/.codex}"/bin/chatgpt_oracle_run.py \
+     reconnect --run-dir "<run-dir>" --session-id "$WEBJJONKU_SESSION_ID" --brief
+   ```
+   `failed_before_submit`이면 아무것도 제출되지 않은 것이므로 원인을 고치고 다시 실행함.
 
 ## 경계
 

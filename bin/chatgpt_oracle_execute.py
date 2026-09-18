@@ -24,7 +24,7 @@ import urllib.request
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
@@ -44,6 +44,10 @@ SUPPORTED_EFFORTS = ("pro", "extra-high", "extended")
 EFFORT_ALIASES = {"high": "extended"}
 EXTENDED_EFFORT_LABELS = frozenset({"extended", "high", "hoch", "erweitert", "高い", "扩展", "深度", "加强", "高", "높음"})
 ORACLE_EXPLICIT_STRATEGY = "select"
+# Oracle's own --browser-timeout is 100m; the wrapper's budget must outlast it
+# so a hung Oracle process (not a slow answer) is what trips the wrapper.
+DEFAULT_OBSERVATION_BUDGET_SECONDS = 110 * 60
+MAX_RECONNECTS = 2
 TERMINAL_ORACLE_STATES = frozenset({"complete", "completed", "done", "finished"})
 UNRESOLVED_STATUSES = frozenset({"prepared", "running", "attention_required"})
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,95}$")
@@ -253,13 +257,26 @@ def _is_chatgpt_session_url(value: Any) -> bool:
 
 def _workspace_project_key(config: ExecutionConfig) -> str:
     if config.session_id:
-        normalized = re.sub(r"[^A-Za-z0-9._-]", "-", config.session_id.strip())
-        root_key = hashlib.sha256(str(config.project_root).casefold().encode("utf-8")).hexdigest()[:12]
-        key = f"sess-{normalized[:70]}-{root_key}"[:95]
-        if RUN_ID_RE.fullmatch(key):
-            return key
-        return f"sess-{hashlib.sha256(config.session_id.encode('utf-8')).hexdigest()[:12]}-{root_key}"
+        # Hash the whole (session_id, exact root) tuple so long or
+        # punctuation-heavy host ids cannot collide after truncation.
+        digest = hashlib.sha256(
+            f"{config.session_id}\0{str(config.project_root).casefold()}".encode("utf-8")
+        ).hexdigest()[:24]
+        return f"sess-{digest}"
     return config.run_id
+
+
+def _legacy_workspace_project_key(config: ExecutionConfig) -> str | None:
+    # Pre-hash scheme: sanitized session id truncated to 70 chars. Read-only
+    # so sessions mapped before the change keep their Project.
+    if not config.session_id:
+        return None
+    normalized = re.sub(r"[^A-Za-z0-9._-]", "-", config.session_id.strip())
+    root_key = hashlib.sha256(str(config.project_root).casefold().encode("utf-8")).hexdigest()[:12]
+    key = f"sess-{normalized[:70]}-{root_key}"[:95]
+    if RUN_ID_RE.fullmatch(key):
+        return key
+    return f"sess-{hashlib.sha256(config.session_id.encode('utf-8')).hexdigest()[:12]}-{root_key}"
 
 
 def _load_workspace_project_map(path: Path) -> dict[str, Any]:
@@ -296,10 +313,15 @@ def _load_workspace_project_map(path: Path) -> dict[str, Any]:
 
 
 def _mapped_workspace_project(config: ExecutionConfig, payload: Mapping[str, Any]) -> dict[str, str] | None:
+    projects = payload.get("projects") or {}
     key = _workspace_project_key(config)
-    entry = (payload.get("projects") or {}).get(key)
+    entry = projects.get(key)
     if entry is None:
-        return None
+        legacy_key = _legacy_workspace_project_key(config)
+        if legacy_key is None or legacy_key not in projects:
+            return None
+        key = legacy_key
+        entry = projects[key]
     if not isinstance(entry, Mapping):
         raise ExecutionError("WORKSPACE_PROJECT_MAP_INVALID", "workspace Project mapping entry is invalid")
     entry_key = str(entry.get("key") or entry.get("run_id") or "")
@@ -580,6 +602,139 @@ def _load_state(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _stamp(state: dict[str, Any], key: str) -> None:
+    timeline = state.get("timeline")
+    if not isinstance(timeline, dict):
+        timeline = {}
+        state["timeline"] = timeline
+    timeline[key] = _utc_now()
+
+
+def _observation_budget_seconds() -> float:
+    raw = str(os.environ.get("CODEX_ORACLE_OBSERVATION_BUDGET_SECONDS") or "").strip()
+    try:
+        value = float(raw) if raw else float(DEFAULT_OBSERVATION_BUDGET_SECONDS)
+    except ValueError:
+        value = float(DEFAULT_OBSERVATION_BUDGET_SECONDS)
+    return value if value > 0 else float(DEFAULT_OBSERVATION_BUDGET_SECONDS)
+
+
+def _new_observation() -> dict[str, Any]:
+    budget = _observation_budget_seconds()
+    deadline = datetime.now(timezone.utc) + timedelta(seconds=budget)
+    return {
+        "budget_seconds": budget,
+        "deadline": deadline.isoformat(timespec="seconds"),
+        "reconnects": 0,
+        "max_reconnects": MAX_RECONNECTS,
+    }
+
+
+def _observation_remaining(state: Mapping[str, Any]) -> float:
+    observation = state.get("observation")
+    if not isinstance(observation, Mapping):
+        return _observation_budget_seconds()
+    try:
+        deadline = datetime.fromisoformat(str(observation.get("deadline")))
+    except (TypeError, ValueError):
+        return 0.0
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=timezone.utc)
+    return (deadline - datetime.now(timezone.utc)).total_seconds()
+
+
+def _wait_bounded(process: Any, remaining: float) -> int:
+    """Wait for an owned Oracle process, killing it at the observation deadline."""
+    try:
+        return int(process.wait(timeout=max(remaining, 0.0)))
+    except subprocess.TimeoutExpired:
+        for stop in ("terminate", "kill"):
+            try:
+                getattr(process, stop)()
+                process.wait(timeout=10)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+            except Exception:
+                break
+        raise ExecutionError(
+            "OBSERVATION_TIMEOUT",
+            "the Oracle process outlived the observation deadline and was stopped; the browser and run directory are preserved",
+            {"remaining_seconds": remaining},
+        )
+
+
+def _phase_for(state: Mapping[str, Any]) -> str:
+    if state.get("status") == "captured":
+        return "captured"
+    submission = state.get("submission")
+    if submission == "not_observed":
+        return "failed_before_submit"
+    if submission == "unknown":
+        return "submission_unknown"
+    if state.get("capture") == "durable":
+        return "saved_unverified"
+    return "awaiting_response"
+
+
+def brief_result(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Compress a runner payload to what an agent needs to decide the next step."""
+    if payload.get("status") == "dry-run":
+        preview = payload.get("workspace_project")
+        return {
+            "ok": payload.get("ok"),
+            "status": "dry-run",
+            "run_dir": payload.get("run_dir"),
+            "resubmit": payload.get("resubmit", False),
+            **({"workspace_project": {
+                "mapped": preview.get("mapped"),
+                "url": preview.get("url"),
+                "bootstrap_required": preview.get("bootstrap_required"),
+            }} if isinstance(preview, Mapping) else {}),
+        }
+    state = payload.get("result")
+    if not isinstance(state, Mapping):
+        return dict(payload)
+    phase = str(state.get("phase") or _phase_for(state))
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), Mapping) else {}
+    observation = state.get("observation") if isinstance(state.get("observation"), Mapping) else {}
+    binding = (state.get("oracle") or {}).get("binding") if isinstance(state.get("oracle"), Mapping) else None
+    conversation_url = binding.get("conversation_url") if isinstance(binding, Mapping) else None
+    run_dir = str(payload.get("run_dir") or "")
+    budget_left = (
+        int(observation.get("reconnects") or 0) < int(observation.get("max_reconnects") or MAX_RECONNECTS)
+        and _observation_remaining(state) > 0
+    )
+    if phase == "captured":
+        next_action = "read output"
+    elif phase == "failed_before_submit":
+        next_action = "nothing was submitted; fix the error and execute again"
+    elif phase == "saved_unverified":
+        next_action = "output is saved; review model_check before trusting it"
+    elif budget_left:
+        next_action = f"reconnect --run-dir {run_dir}"
+    else:
+        next_action = "observation budget exhausted; inspect conversation_url manually before any resubmit"
+    return {
+        "ok": payload.get("ok"),
+        "status": payload.get("status"),
+        "phase": phase,
+        "run_id": state.get("run_id"),
+        "run_dir": run_dir,
+        "output": artifacts.get("output") if state.get("capture") == "durable" else None,
+        "output_bytes": artifacts.get("output_bytes", 0),
+        "verified": bool((state.get("model_check") or {}).get("verified")),
+        "conversation_url": conversation_url,
+        "error_code": state.get("error_code"),
+        "error": state.get("error"),
+        "next_action": next_action,
+    }
+
+
 def _initial_state(
     config: ExecutionConfig,
     run_dir: Path,
@@ -627,6 +782,9 @@ def _initial_state(
         },
         "tab_close": {"status": "not_attempted"},
         "recovery": {"kind": "same-session-only", "resubmit": False},
+        "observation": _new_observation(),
+        "phase": "preparing",
+        "timeline": {"prepared": _utc_now()},
     }
 
 
@@ -1132,6 +1290,8 @@ def _finalize_capture(
             "model_check": model_check,
         }
     )
+    state["phase"] = _phase_for(state)
+    _stamp(state, "finalized")
     state["oracle"]["binding"] = binding
     state["artifacts"].update(
         {"output_sha256": capture["sha256"], "output_bytes": capture["bytes"]}
@@ -1506,6 +1666,7 @@ def execute_config(
             )
             state["workspace_project"] = workspace_project
             state["personalization_preflight"] = preflight
+            _stamp(state, "browser_ready")
             _write_json_atomic(state_path, state)
             argv = build_oracle_argv(
                 config,
@@ -1528,23 +1689,31 @@ def execute_config(
                     **_subprocess_kwargs(),
                 )
                 launch_attempted = True
-                state.update({"status": "running", "submission": "unknown", "oracle_process_pid": getattr(process, "pid", None)})
+                state.update({"status": "running", "submission": "unknown", "phase": "submission_unknown",
+                              "oracle_process_pid": getattr(process, "pid", None)})
+                _stamp(state, "launched")
                 _write_json_atomic(state_path, state)
-                state["exit_code"] = int(process.wait())
+                state["exit_code"] = _wait_bounded(process, _observation_remaining(state))
+                _stamp(state, "exited")
         except Exception as exc:
             if preflight is not None and not launch_attempted:
                 state["browser_cleanup"] = browser_cleanup(preflight, command)
+            error_code = exc.code if isinstance(exc, ExecutionError) else None
             state.update({"status": "attention_required",
                           "submission": "unknown" if launch_attempted else "not_observed",
                           "failure_stage": (
-                              "oracle-launch-or-observation"
+                              "observation-timeout"
+                              if error_code == "OBSERVATION_TIMEOUT"
+                              else "oracle-launch-or-observation"
                               if launch_attempted
                               else "workspace-project-bootstrap"
                               if profile_prepared
                               else "profile-preparation"
                           ),
-                          "error_code": exc.code if isinstance(exc, ExecutionError) else None,
+                          "error_code": error_code,
                           "error": str(exc)})
+            state["phase"] = _phase_for(state)
+            _stamp(state, "finalized")
             _write_json_atomic(state_path, state)
             return {"ok": False, "status": state["status"], "run_dir": str(run_dir), "result": state}
         state = _finalize_capture(
@@ -1583,6 +1752,7 @@ def reconnect_run(
     run_dir: Path,
     *,
     dry_run: bool = False,
+    session_id: str | None = None,
     popen_factory: Callable[..., Any] = subprocess.Popen,
     tab_closer: Callable[[Mapping[str, Any]], dict[str, Any]] = close_owned_tab,
     browser_cleanup: Callable[..., dict[str, Any]] = _cleanup_personalized_browser,
@@ -1591,7 +1761,7 @@ def reconnect_run(
     state_path = directory / "state.json"
     if dry_run:
         return _reconnect_locked(
-            directory, state_path, _load_state(state_path), dry_run=True,
+            directory, state_path, _load_state(state_path), dry_run=True, session_id=session_id,
             popen_factory=popen_factory, tab_closer=tab_closer,
             browser_cleanup=browser_cleanup,
         )
@@ -1602,6 +1772,7 @@ def reconnect_run(
             state_path,
             state,
             dry_run=dry_run,
+            session_id=session_id,
             popen_factory=popen_factory,
             tab_closer=tab_closer,
             browser_cleanup=browser_cleanup,
@@ -1617,11 +1788,21 @@ def _reconnect_locked(
     popen_factory: Callable[..., Any],
     tab_closer: Callable[[Mapping[str, Any]], dict[str, Any]],
     browser_cleanup: Callable[..., dict[str, Any]],
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     owner = str(state.get("source_thread_id") or "").strip().casefold()
     current = str(os.environ.get("CODEX_THREAD_ID") or "").strip().casefold()
     if owner and owner != current:
         raise ExecutionError("FOREIGN_TASK_RUN", "only the owning Codex task may reconnect this execution")
+    owner_session = str(state.get("session_id") or "")
+    if owner_session and owner_session != (_resolve_session_id(session_id) or ""):
+        # A run created inside one host session is never taken over by another
+        # session, and never by an anonymous CLI call: pass --session-id.
+        raise ExecutionError(
+            "FOREIGN_SESSION_RUN",
+            "only the owning host session may reconnect this execution; pass the same --session-id",
+            {"owner_session_id": owner_session},
+        )
     if state.get("status") == "captured":
         raise ExecutionError("RUN_ALREADY_CAPTURED", "captured executions do not need reconnect")
     if state.get("status") == "running" and _pid_alive(state.get("oracle_process_pid")):
@@ -1642,6 +1823,28 @@ def _reconnect_locked(
         raise ExecutionError("RECOVERY_PROMPT_FORBIDDEN", "reconnect must never contain a prompt")
     if dry_run:
         return {"ok": True, "status": "dry-run", "run_dir": str(directory), "argv": argv, "resubmit": False}
+    # The observation budget belongs to the run, not to one observer process:
+    # reconnecting never resets the deadline or the reconnect count.
+    observation = state.get("observation")
+    if not isinstance(observation, dict):
+        observation = _new_observation()
+        state["observation"] = observation
+    reconnects = int(observation.get("reconnects") or 0)
+    remaining = _observation_remaining(state)
+    exhausted = (
+        ("OBSERVATION_RECONNECTS_EXHAUSTED", f"reconnect budget of {observation.get('max_reconnects', MAX_RECONNECTS)} is used up")
+        if reconnects >= int(observation.get("max_reconnects") or MAX_RECONNECTS)
+        else ("OBSERVATION_DEADLINE_PASSED", "the run's observation deadline has passed")
+        if remaining <= 0
+        else None
+    )
+    if exhausted:
+        state.update({"status": "attention_required", "error_code": exhausted[0], "error": exhausted[1]})
+        state["phase"] = _phase_for(state)
+        _stamp(state, "finalized")
+        _write_json_atomic(state_path, state)
+        return {"ok": False, "status": state["status"], "run_dir": str(directory), "result": state}
+    observation["reconnects"] = reconnects + 1
     reconnect_stdout = directory / "reconnect-stdout.log"
     reconnect_stderr = directory / "reconnect-stderr.log"
     try:
@@ -1657,10 +1860,16 @@ def _reconnect_locked(
                 **_subprocess_kwargs(),
             )
             state.update({"status": "running", "reconnect_process_pid": getattr(process, "pid", None)})
+            _stamp(state, f"reconnect_{reconnects + 1}_launched")
             _write_json_atomic(state_path, state)
-            state["reconnect_exit_code"] = int(process.wait())
+            state["reconnect_exit_code"] = _wait_bounded(process, remaining)
+            _stamp(state, f"reconnect_{reconnects + 1}_exited")
     except Exception as exc:
-        state.update({"status": "attention_required", "error": str(exc)})
+        state.update({"status": "attention_required",
+                      "error_code": exc.code if isinstance(exc, ExecutionError) else None,
+                      "error": str(exc)})
+        state["phase"] = _phase_for(state)
+        _stamp(state, "finalized")
         _write_json_atomic(state_path, state)
         return {"ok": False, "status": state["status"], "run_dir": str(directory), "result": state}
     # The original stdout contains the one model/effort proof; reconnect never
