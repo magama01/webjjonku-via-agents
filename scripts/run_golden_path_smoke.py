@@ -63,7 +63,7 @@ def run_smoke(*, bin_root: Path) -> dict[str, Any]:
         )
         config = compiled["config"]
         record("mission_contract_compiles", compiled["manifest"]["schema"] == executor.MANIFEST_SCHEMA)
-        record("explicit_latest_pro_default", config.model == "latest" and config.effort == "pro")
+        record("default_selection_is_sol_high", config.model == "gpt-5.6-sol" and config.effort == "extended")
         record("registered_app_selected", config.app_name == "codex")
         prompt = executor._composer_prompt(config)
         record("prompt_has_exact_app_and_mission", "@codex" in prompt and str(mission.resolve()) in prompt)

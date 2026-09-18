@@ -8,7 +8,8 @@ requirements. Do not recreate retired automation modes or audit ceremonies.
 
 Use one mission-based flow, explicit model/effort selection, temporary chats,
 durable result capture before owned-tab cleanup, and exact-run recovery without
-automatic resubmission. Select Latest explicitly before the requested effort.
+automatic resubmission. The default selection is GPT-5.6 Sol with High
+(`extended`) effort. When Latest is requested instead: Select Latest explicitly before the requested effort.
 The runner enables temporary-chat personalization before submission. Account settings and permissions remain user-controlled. New work has
 no archive/restore phase.
 

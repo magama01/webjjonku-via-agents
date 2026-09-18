@@ -9,11 +9,16 @@ records retain their original meaning and are never rewritten by this policy.
 
 - Express planning, research, review, and implementation requirements in the
   mission, not separate execution modes. Select the model and effort explicitly.
-- Oracle 0.20.0 natively selects **Latest** in ChatGPT, then the requested
-  effort. The default is Pro, observed as **6 Pro**. Do not select GPT-5.6
-  numerically to obtain Pro. Only the hash-bound Korean Latest and quota-limited
-  four-tier compatibility fixes remain; retire them when upstream covers both.
-  A disabled Pro option must never silently fall back to another effort.
+- The runner default is **GPT-5.6 Sol → High** (`--model gpt-5.6-sol
+  --effort extended`; `high` is accepted as an alias). ChatGPT labels that
+  tier "High" on Sol's three-position slider, and the hash-bound slider
+  compatibility fix accepts the three-, four-, and five-position layouts.
+- When `latest` is requested, Oracle 0.20.0 natively selects **Latest** in
+  ChatGPT, then the requested effort. Its effort default is Pro, observed as
+  **6 Pro**. Do not select GPT-5.6 numerically to obtain Pro. Only the
+  hash-bound Korean Latest and slider-layout compatibility fixes remain; retire
+  them when upstream covers both. A disabled Pro option must never silently
+  fall back to another effort.
 - User-authorized workspace Projects use their mapped Project URL and saved Chat conversations. Confirm Chat mode before submission; Work mode does not provide the same connected tools. Never fall back silently to a temporary chat when Project setup fails.
 - The temporary-chat path enables and confirms temporary-chat personalization before submission; it does not change account settings. If confirmation fails, do not submit.
   Do not silently change account, privacy, app, or permission settings.

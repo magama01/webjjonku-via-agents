@@ -18,11 +18,11 @@ project root. Preview without starting a browser or submitting a prompt:
 python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_run.py" execute --project-root C:\project --mission-path C:\project\mission.md --model latest --effort pro --dry-run
 ```
 
-For authorized execution remove `--dry-run`. Select the requested effort;
-`extra-high` is also supported. Do not infer permission for an unrelated task
-or silently downgrade. Oracle 0.20.0 receives the native `latest/select`
-request directly. Explicitly click Latest before selecting effort and check
-the observed `6 Pro` selection once.
+For authorized execution remove `--dry-run`. The default is `gpt-5.6-sol` with
+`extended` (High) effort; `pro` and `extra-high` are also supported. Do not infer
+permission for an unrelated task or silently downgrade. With `--model latest`,
+Oracle 0.20.0 receives the native `latest/select` request directly: explicitly
+click Latest before selecting effort and check the observed `6 Pro` selection once.
 
 Use the configured app name (default `codex`) and exact project root.
 Do not change authentication, approved roots, account personalization, app

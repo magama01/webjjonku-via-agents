@@ -132,7 +132,8 @@ The app and every project follow the [shared automation policy](docs/AUTOMATION_
 Planning, research, review, and editing belong in the mission, not separate
 execution modes. Select the model and effort explicitly.
 
-The default compatibility route selects **Latest → Pro (6 Pro)**, never the
+The runner defaults to **GPT-5.6 Sol → High** (`--model gpt-5.6-sol --effort extended`).
+The legacy compatibility route selects **Latest → Pro (6 Pro)**, never the
 numeric GPT-5.6 row. Use temporary chats. Automatically enable and confirm temporary-chat
 personalization before submission, save the result durably, then close only the owned tab.
 Recover that same tab after timeout or connection failure; do not automatically

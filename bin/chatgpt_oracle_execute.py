@@ -36,10 +36,13 @@ CHATGPT_URL = "https://chatgpt.com/?temporary-chat=true"
 CHATGPT_HOME_URL = "https://chatgpt.com/"
 WORKSPACE_PROJECT_MAP_SCHEMA = "codex.chatgpt.workspace-project-map/v1"
 DEFAULT_APP_NAME = "codex"
-DEFAULT_MODEL = "latest"
-DEFAULT_EFFORT = "pro"
+DEFAULT_MODEL = "gpt-5.6-sol"
+DEFAULT_EFFORT = "extended"
 SUPPORTED_MODELS = ("latest", "gpt-5.6-sol")
 SUPPORTED_EFFORTS = ("pro", "extra-high", "extended")
+# ChatGPT labels Oracle's "extended" tier "High" on the GPT-5.6 Sol slider.
+EFFORT_ALIASES = {"high": "extended"}
+EXTENDED_EFFORT_LABELS = frozenset({"extended", "high", "hoch", "erweitert", "高い", "扩展", "深度", "加强", "高", "높음"})
 ORACLE_EXPLICIT_STRATEGY = "select"
 TERMINAL_ORACLE_STATES = frozenset({"complete", "completed", "done", "finished"})
 UNRESOLVED_STATUSES = frozenset({"prepared", "running", "attention_required"})
@@ -154,6 +157,7 @@ def _normalize_model(value: str | None) -> str:
 
 def _normalize_effort(value: str | None) -> str:
     effort = str(value or DEFAULT_EFFORT).strip().casefold().replace("_", "-")
+    effort = EFFORT_ALIASES.get(effort, effort)
     if effort not in SUPPORTED_EFFORTS:
         raise ExecutionError("EFFORT_UNSUPPORTED", "effort is not supported by the lean Oracle route", {"supported": list(SUPPORTED_EFFORTS)})
     return effort
@@ -907,6 +911,8 @@ def observed_model_check(stdout_path: Path, *, model: str, effort: str) -> dict[
         expected_effort_labels = (
             {"pro"}
             if effort == "pro"
+            else EXTENDED_EFFORT_LABELS
+            if effort == "extended"
             else {"extrahigh", "sehrhoch", "非常に高い", "極高", "极高", "매우높음"}
         )
         native_verified = bool(
@@ -990,9 +996,12 @@ def observed_model_check(stdout_path: Path, *, model: str, effort: str) -> dict[
         token in compact_evidence
         for token in ("resolvedlabel=gpt-5.6sol", "strategy=select", "verified=yes")
     )
+    thinking_label = compact_thinking.split("thinkingtime:", 1)[1] if "thinkingtime:" in compact_thinking else ""
     effort_verified = (
         (effort == "pro" and ("pro,5of5" in compact_thinking or compact_thinking.endswith(":pro")))
         or (effort == "extra-high" and ("extrahigh" in compact_thinking or "4of5" in compact_thinking))
+        # startswith keeps "extrahigh" from satisfying an "extended"/High request.
+        or (effort == "extended" and thinking_label.startswith(tuple(EXTENDED_EFFORT_LABELS)))
     )
     return {
         "verified": bool(model_verified and effort_verified),

@@ -4282,7 +4282,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Keep selection arguments unset at parse time so an explicit override can
     # never be silently discarded when --manifest already owns the selection.
     execute_parser.add_argument("--model", choices=EXECUTOR.SUPPORTED_MODELS)
-    execute_parser.add_argument("--effort", choices=EXECUTOR.SUPPORTED_EFFORTS)
+    execute_parser.add_argument("--effort", choices=(*EXECUTOR.SUPPORTED_EFFORTS, *EXECUTOR.EFFORT_ALIASES))
     execute_parser.add_argument("--app-name")
     execute_parser.add_argument("--dry-run", action="store_true")
     reconnect_parser = commands.add_parser("reconnect", help="prompt-free continuation of one ordinary run")

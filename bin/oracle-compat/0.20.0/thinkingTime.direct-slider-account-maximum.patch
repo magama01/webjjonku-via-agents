@@ -9,7 +9,7 @@ diff --git a/dist/src/browser/actions/thinkingTime.js b/dist/src/browser/actions
          verified: status === "already-selected" || status === "switched",
          strictFailClosed: strictProEffort,
          targetModelKind: targetModelKind ?? null,
-@@ -1030,11 +1031,16 @@
+@@ -1030,11 +1031,17 @@
            .filter(Boolean);
          if (selections.length !== 1) return null;
          const { label, index, level } = selections[0];
@@ -19,19 +19,20 @@ diff --git a/dist/src/browser/actions/thinkingTime.js b/dist/src/browser/actions
 -            thumb.getAttribute('aria-valuenow') !== String(index)) return null;
 -        return { control, label, index, level };
 +        const maximumAttribute = thumb.getAttribute('aria-valuemax');
-+        const maximum = maximumAttribute === '3' || maximumAttribute === '4'
++        const maximum = maximumAttribute === '2' || maximumAttribute === '3' || maximumAttribute === '4'
 +          ? Number(maximumAttribute)
 +          : null;
-+        // The account can expose either the four-position (0..3) layout or the
-+        // five-position (0..4) layout. Any other range or contradictory label/index
-+        // pair is unverified; never infer Pro from the highest numeric position.
++        // The account can expose the three-position (0..2, e.g. GPT-5.6 Sol's
++        // Low/Medium/High), four-position (0..3), or five-position (0..4) layout.
++        // Any other range or contradictory label/index pair is unverified; never
++        // infer Pro from the highest numeric position.
 +        if (thumb.getAttribute('aria-valuemin') !== '0' || maximum === null ||
 +            thumb.getAttribute('aria-valuenow') !== String(index) || index > maximum) return null;
 +        return { control, label, index, level, maximum };
        };
        let current = resolve();
        const finish = (result) => { closeOpenMenus(); return result; };
-@@ -1050,14 +1056,38 @@
+@@ -1050,14 +1057,38 @@
        const targetIndex = ['light', 'standard', 'extended', 'extra-high', 'pro'].indexOf(target);
        if (targetIndex < 0) {
          if (TARGET_IS_GPT56_MODEL && TARGET_LEVEL === 'heavy' && current.level === 'pro') {
@@ -73,7 +74,7 @@ diff --git a/dist/src/browser/actions/thinkingTime.js b/dist/src/browser/actions
          const previousIndex = current.index;
          const key = targetIndex > previousIndex ? 'ArrowRight' : 'ArrowLeft';
          current.control.focus?.();
-@@ -1069,7 +1099,12 @@
+@@ -1069,7 +1100,12 @@
            if (next && next.index !== previousIndex) { current = next; break; }
          }
          if (!current) return finish(failure('selection-unverified'));
