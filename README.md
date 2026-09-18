@@ -67,18 +67,31 @@ python3 doctor.py
 ### 3. 공개 주소 만들기
 
 ChatGPT가 내 컴퓨터의 `http://127.0.0.1:7676`에 접속할 수 있게 고정 HTTPS 주소가 필요합니다.
-셋 중 **하나만** 고르세요. 처음이면 3-1 Tailscale이 가장 쉽습니다 (설치 스크립트가 다 해줌).
+아래 셋 중 **하나만** 고르세요.
 
-#### 3-1. Tailscale (추천)
+| | 3-1 Tailscale | 3-2 Cloudflare Tunnel | 3-3 ngrok |
+|---|---|---|---|
+| 난이도 | ⭐ 쉬움 (추천) | ⭐⭐ | ⭐⭐ |
+| 필요한 것 | Tailscale 계정 | Cloudflare에 올린 내 도메인 | ngrok 계정 |
+| 주소 형태 | `https://내기기.내테일넷.ts.net/mcp` | `https://mcp.내도메인.com/mcp` | `https://내이름.ngrok.app/mcp` |
+| 주소 입력 | 자동 | 4단계에서 `--public-url`로 | 4단계에서 `--public-url`로 |
+| 부팅 시 자동 실행 | 설치 스크립트가 등록 | `cloudflared service install` | `ngrok service install` |
+
+<details open>
+<summary><b>3-1. Tailscale (추천)</b> — 설치 스크립트가 터널·자동 실행까지 다 해줍니다</summary>
 
 1. [tailscale.com](https://tailscale.com) 가입 후 앱 설치·로그인
-2. 관리 콘솔에서 **MagicDNS**, **HTTPS**, **Funnel** 켜기 (DNS → Enable MagicDNS / Enable HTTPS, Access controls → Funnel)
+2. 관리 콘솔에서 세 가지 켜기
+   - DNS → **Enable MagicDNS**
+   - DNS → **Enable HTTPS**
+   - Access controls → **Funnel** 허용
 3. 내 기기 이름 확인: `tailscale status` 에 나오는 `내기기.내테일넷.ts.net`
-4. 4단계로 진행. 주소는 자동으로 잡힙니다.
+4. 끝. 4단계로 진행하면 주소는 자동으로 잡힙니다.
 
-#### 3-2. Cloudflare Tunnel
+</details>
 
-내 도메인이 Cloudflare에 있어야 합니다.
+<details>
+<summary><b>3-2. Cloudflare Tunnel</b> — 내 도메인이 Cloudflare에 있을 때</summary>
 
 ```bash
 cloudflared tunnel login
@@ -87,30 +100,36 @@ cloudflared tunnel route dns webjjonku mcp.내도메인.com
 cloudflared tunnel run --url http://127.0.0.1:7676 webjjonku
 ```
 
-동작 확인 후 부팅 시 자동 실행으로 등록:
+브라우저에서 `https://mcp.내도메인.com/mcp` 열어서 응답(401이면 정상)이 오면, 부팅 시 자동 실행으로 등록:
 
 ```bash
 sudo cloudflared service install
 ```
 
-주소는 `https://mcp.내도메인.com/mcp` 입니다.
+4단계에서 `--public-url https://mcp.내도메인.com/mcp` 로 넘깁니다.
 
-#### 3-3. ngrok
+</details>
 
-무료 계정도 고정 도메인 1개를 줍니다 (대시보드 → Domains).
+<details>
+<summary><b>3-3. ngrok</b> — 무료 계정도 고정 도메인 1개 제공</summary>
+
+1. [dashboard.ngrok.com](https://dashboard.ngrok.com) → **Domains** 에서 고정 도메인 하나 만들기 (예: `내이름.ngrok.app`)
+2. 터널 실행
 
 ```bash
 ngrok config add-authtoken <내 토큰>
 ngrok http --url=https://내이름.ngrok.app 7676
 ```
 
-동작 확인 후 부팅 시 자동 실행으로 등록:
+3. 브라우저에서 `https://내이름.ngrok.app/mcp` 열어서 응답(401이면 정상)이 오면, 부팅 시 자동 실행으로 등록:
 
 ```bash
 ngrok service install --config ~/.config/ngrok/ngrok.yml
 ```
 
-주소는 `https://내이름.ngrok.app/mcp` 입니다.
+4단계에서 `--public-url https://내이름.ngrok.app/mcp` 로 넘깁니다.
+
+</details>
 
 ### 4. 연결 마법사
 
