@@ -1711,7 +1711,10 @@ def execute_config(
                               else "profile-preparation"
                           ),
                           "error_code": error_code,
-                          "error": str(exc)})
+                          "error": str(exc),
+                          # Keep the preflight/Oracle detail so a failure can be
+                          # diagnosed from state.json without reproducing it.
+                          "error_evidence": exc.evidence if isinstance(exc, ExecutionError) else None})
             state["phase"] = _phase_for(state)
             _stamp(state, "finalized")
             _write_json_atomic(state_path, state)

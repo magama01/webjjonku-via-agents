@@ -423,7 +423,11 @@ export async function startPersonalizedBrowser(options, dependencies) {
   const logs = [];
   const logger = message => { logs.push(String(message).slice(0, 500)); options.logger?.(message); };
   logger.verbose = false;
-  const flags = deps.lifecycle.buildChromeFlagsForTest(false, undefined, !bootstrappingProject);
+  // Opt-in experiment: WEBJJONKU_HEADLESS=1 launches the owned Chrome with
+  // --headless=new instead of an off-screen headed window. Default stays headed.
+  const headless = (options.headless ?? process.env.WEBJJONKU_HEADLESS) === true
+    || (options.headless ?? process.env.WEBJJONKU_HEADLESS) === '1';
+  const flags = deps.lifecycle.buildChromeFlagsForTest(headless, undefined, !bootstrappingProject && !headless);
   if (profileName) flags.push(`--profile-directory=${profileName}`);
   flags.push('--hide-crash-restore-bubble');
   const launchOptions = deps.lifecycle.resolveChromeLaunchOptionsForTest(flags, true);
@@ -474,7 +478,7 @@ export async function startPersonalizedBrowser(options, dependencies) {
       throw new Error('expected exactly the owned temporary-chat startup tab');
     }
     const platform = options.platform ?? process.platform;
-    if (!bootstrappingProject && platform === 'darwin') {
+    if (!bootstrappingProject && !headless && platform === 'darwin') {
       await deps.lifecycle.positionChromeWindowOffscreen(client, profilePath, logger);
     }
     await Promise.all([client.Page.enable(), client.Runtime.enable()]);
@@ -518,7 +522,7 @@ export async function startPersonalizedBrowser(options, dependencies) {
         throw new Error('browser CDP identity is unavailable');
       }
       return { chrome: launcher, client, evidence: {
-        ok: true, pid: Number(launcher.pid), port: actualPort, target_id: targetId,
+        ok: true, pid: Number(launcher.pid), port: actualPort, target_id: targetId, headless,
         conversation_url: conversationUrl, browser_ws: version.webSocketDebuggerUrl,
         project_url: workspaceProject.url, project_created: workspaceProject.created,
         instructions_verified: instructionEvidence?.verified === true,
@@ -550,7 +554,7 @@ export async function startPersonalizedBrowser(options, dependencies) {
       throw new Error('browser CDP identity is unavailable');
     }
     return { chrome: launcher, client, evidence: {
-      ok: true, pid: Number(launcher.pid), port: actualPort, target_id: targetId,
+      ok: true, pid: Number(launcher.pid), port: actualPort, target_id: targetId, headless,
       conversation_url: conversationUrl, browser_ws: version.webSocketDebuggerUrl,
       ...(projectRun ? { project_url: normalizeProjectUrl(conversationUrl) } : {}),
       startup_blank_tabs: 0, page_count: 1, personalization: projectRun ? 'not-applicable' : 'enabled', logs,

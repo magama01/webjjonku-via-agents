@@ -178,4 +178,5 @@
 
 - 완료: 실행 경로·배포 정리(`CODEX_HOME` 기준, skills CLI 배포), 기본 모델 `gpt-5.6-sol`/`extended`(High)와 Sol 3단계 슬라이더 검증, session_id 해시 키와 legacy 키 호환, 다른 세션의 reconnect 거부(`FOREIGN_SESSION_RUN`), 관찰 예산(`observation.deadline`, 재연결 최대 2회, `OBSERVATION_TIMEOUT`), `--brief` 반환과 `phase` 분류, `timeline` 계측.
 - 실환경: Sol/High 읽기 미션 1회 `captured` 확인. 같은 session_id 재실행이 같은 Project를 재사용하는 것은 dry-run으로 확인.
-- 남음: CDP/renderer 생존 점검(30초 간격, 3회 실패 시 복구)은 미구현 — 현재는 프로세스 종료 시한만 강제함. hidden-window 초점 측정, Project 메모리 격리 확인, 브라우저 시작 재사용, 병렬.
+- headless 검증(2026-09-18): `WEBJJONKU_HEADLESS=1` opt-in으로 preflight가 `--headless=new`를 사용하도록 추가한 뒤 같은 seed 프로필 사본·같은 Project URL로 A/B 실행함. headed preflight는 `ok:true`(로그인 유지, composer 준비). headless는 `Prompt textarea did not appear` — CDP로 확인한 페이지는 50초 넘게 `Just a moment...`(Cloudflare 챌린지)에 머묾. 즉 **headless는 이 계정·머신에서 Cloudflare 봇 챌린지에 막힘**. 로그인·picker·DevSpace 단계까지 도달하지 못했으므로 그 뒤 체크리스트는 미검증. 기본값은 headed 유지, opt-in은 재시도용으로만 남김.
+- 남음: CDP/renderer 생존 점검(30초 간격, 3회 실패 시 복구)은 미구현 — 현재는 프로세스 종료 시한만 강제함. hidden-window 초점 측정, Project 메모리 격리 확인, 브라우저 시작 재사용, 병렬. headless는 챌린지 통과 수단(별도 GUI 세션/가상 디스플레이의 headed Chrome)이 생기면 재검증.
