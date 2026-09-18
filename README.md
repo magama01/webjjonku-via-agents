@@ -8,10 +8,24 @@
 ([최신 릴리스](https://github.com/ventianima-lab/codex-web-gpt-automation/releases/latest) ·
 <img alt="Release" src="https://img.shields.io/github/v/tag/ventianima-lab/codex-web-gpt-automation?sort=semver&label=release">)의 포크입니다.
 원본은 로컬 프로젝트를 **웹 ChatGPT**(브라우저 로그인 세션)에 안전하게 연결해서, ChatGPT가 내 프로젝트
-파일을 읽고 분석·작업하게 만드는 도구입니다. 이 포크는 그걸 **Claude Code · Codex · agy(Antigravity)에서
-`/wjk <요청>` 한 줄로** 쓸 수 있게 다듬은 버전입니다.
+파일을 읽고 분석·작업하게 만드는 도구입니다.
 
 > 커뮤니티 프로젝트이며 OpenAI 공식 제품이 아닙니다. ChatGPT 로그인·앱 등록은 본인이 직접 합니다.
+
+## 원본과 다른 점
+
+| 항목 | 원본 | 이 포크 |
+|---|---|---|
+| 사용 주체 | Codex 전용 (`$chatgpt-oracle-runtime` 스킬) | Claude Code · Codex · agy(Antigravity) 공통. `/wjk <요청>` 한 줄 |
+| ChatGPT 대화 단위 | 실행마다 임시채팅 | **에이전트 세션당 ChatGPT Project 1개**를 만들고 같은 세션의 이후 실행은 재사용. `--session-id` 또는 세션 환경변수(`WEBJJONKU_SESSION_ID`, `CODEX_SESSION_ID`, `AGY_CONVERSATION_ID`, `CLAUDE_SESSION_ID`)로 식별. 없으면 단발 실행 |
+| Project 준비 | 없음 | 브라우저 preflight가 Project 생성·지시문 기록·Chat 모드 확인까지 수행. Project 설정 실패 시 임시채팅으로 조용히 넘어가지 않음 |
+| 동시 실행 보호 | 없음 | 제출 락·Project 매핑 파일 락 추가 (같은 세션 두 실행이 Project를 중복 생성하지 않음) |
+| 스킬 배포 | `install.py`로 `~/.codex/skills`에만 | `npx skills add magama01/webjjonku-via-agents -s wjk`로 세 에이전트에 한 번에. `install.py` 매니페스트에도 포함 |
+| Claude 세션 ID | 해당 없음 | `setup-claude-hook.sh`가 SessionStart 훅을 추가해 `WEBJJONKU_SESSION_ID`를 자동 주입 |
+| 스킬 안 경로 | 절대경로 | `${CODEX_HOME:-$HOME/.codex}` 기준. 어디서 호출해도 설치본 사용 |
+| 문서 | 운영·정책 중심 | 이 README를 설치 절차 중심으로 재작성. `docs/AGENT_INTEGRATION.md`(에이전트별 연동), `docs/WEBJJONKU_OPTIMIZATION_PLAN.md`(후속 계획) 추가 |
+
+실행기 본체(Oracle·DevSpace 연동, 모델 선택, 복구 규칙)는 원본과 같습니다.
 
 ## 되는 것
 
