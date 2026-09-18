@@ -3,56 +3,41 @@
 웹쫀쿠 실행기는 Codex 전용 API가 아니라 로컬 Python CLI임. 따라서 Claude Code,
 agy 등 셸 명령을 실행할 수 있는 에이전트에서 같은 실행기를 호출할 수 있음.
 
+## 설치 (Claude Code · Codex · agy 공통)
+
+실행기는 저장소 `install.py`가 `${CODEX_HOME:-$HOME/.codex}`에 배포함. 스킬은
+[skills CLI](https://skills.sh)로 세 에이전트에 한 번에 추가함.
+
+```bash
+git clone https://github.com/magama01/webjjonku-via-agents.git && cd webjjonku-via-agents && python3 install.py
+npx skills add magama01/webjjonku-via-agents -s wjk -g -a claude-code -a codex -a antigravity
+```
+
+결과: `~/.agents/skills/wjk` (Codex·Antigravity가 직접 읽음), `~/.claude/skills/wjk` (심링크).
+갱신은 `npx skills update wjk`.
+
 ## Claude Code
 
-Claude가 스킬을 자동 검색하는 위치에 공통 스킬을 복사함.
+`/wjk <요청>` 한 번으로 미션 작성·실행·회수까지 맡김.
+
+세션당 Project 재사용에는 세션 ID가 필요한데 Claude Code는 Bash 환경에 세션 ID를
+넘기지 않음. 아래 스크립트가 `~/.claude/settings.json`의 `hooks.SessionStart`에
+`WEBJJONKU_SESSION_ID=claude-<session_id>`를 `CLAUDE_ENV_FILE`로 내보내는 훅을 추가함
+(멱등, 새 세션부터 적용, 훅 실행에 `jq` 필요).
 
 ```bash
-mkdir -p "$HOME/.claude/skills/webjjonku-portable"
-cp ${CODEX_HOME:-$HOME/.codex}/skills/webjjonku-portable/SKILL.md \
-  "$HOME/.claude/skills/webjjonku-portable/SKILL.md"
+sh ~/.agents/skills/wjk/setup-claude-hook.sh
 ```
 
-Claude에게는 `웹쫀쿠로 분석해줘`처럼 요청하면 됨. 스킬은 미션 파일 작성 후
-`bin/chatgpt_oracle_run.py execute`를 호출하도록 안내함.
+훅 없이도 `/wjk`는 동작하되 매 실행이 단발(새 Project)임.
 
-### `/wjk` 슬래시 명령
+## Codex · agy
 
-`/wjk <요청>` 한 번으로 미션 작성·실행·회수까지 맡기려면 `skills/wjk`를 추가로 복사함.
+같은 `wjk` 스킬을 `$wjk` 또는 이름으로 호출함. 세션 ID는 `CODEX_SESSION_ID`,
+`AGY_CONVERSATION_ID` / `ANTIGRAVITY_CONVERSATION_ID`가 환경에 있으면 자동 감지됨.
+없으면 `--session-id`를 직접 넘기거나 단발 실행됨.
 
-```bash
-mkdir -p "$HOME/.claude/skills/wjk"
-cp ${CODEX_HOME:-$HOME/.codex}/skills/wjk/SKILL.md \
-  "$HOME/.claude/skills/wjk/SKILL.md"
-```
-
-세션당 Project 재사용에는 세션 ID가 필요함. Claude Code는 Bash 환경에 세션 ID를
-넘기지 않으므로 `~/.claude/settings.json`의 `hooks.SessionStart`에 다음을 추가함.
-훅이 `CLAUDE_ENV_FILE`에 `WEBJJONKU_SESSION_ID=claude-<session_id>`를 기록하고
-이후 모든 Bash 호출에서 그 값을 사용함.
-
-```json
-{
-  "hooks": [
-    {
-      "type": "command",
-      "command": "[ -n \"${CLAUDE_ENV_FILE-}\" ] && jq -r '\"export WEBJJONKU_SESSION_ID=claude-\" + .session_id' >> \"$CLAUDE_ENV_FILE\"; exit 0"
-    }
-  ]
-}
-```
-
-새 세션부터 적용됨. 현재 세션에서는 `WEBJJONKU_SESSION_ID`가 비어 있으므로 단발 실행으로 동작함.
-
-## agy 및 기타 에이전트
-
-고정된 스킬 디렉터리 규약이 없는 에이전트는 다음 파일을 프로젝트 지시 또는
-에이전트 시스템 프롬프트에 포함함.
-
-`${CODEX_HOME:-$HOME/.codex}/skills/webjjonku-portable/SKILL.md`
-
-그 후 에이전트가 동일한 `python3 .../bin/chatgpt_oracle_run.py execute` 명령을
-호출하면 됨. 에이전트가 셸 실행을 지원하지 않으면 이 방식으로는 사용할 수 없음.
+셸을 못 쓰는 에이전트는 이 방식으로 사용할 수 없음.
 
 ## 동작 경계
 

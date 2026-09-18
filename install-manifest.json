@@ -133,6 +133,7 @@
     "skills/chatgpt-oracle-runtime/SKILL.md",
     "skills/webjjonku-portable/SKILL.md",
     "skills/wjk/SKILL.md",
+    "skills/wjk/setup-claude-hook.sh",
     "skills/chatgpt-oracle-runtime/agents/openai.yaml",
     "skills/chatgpt-oracle-runtime/scripts/run_chatgpt_oracle.py",
     "skills/chatgpt-workspace-setup/SKILL.md",

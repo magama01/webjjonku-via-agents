@@ -41,6 +41,13 @@ endpoint 확인 → Oracle 전용 브라우저 로그인 → Local Network 권�
 표시하며, 실제 프로젝트 읽기 검증까지 끝난 뒤에만
 설치 완료로 판정합니다.
 
+Claude Code·Codex·agy(Antigravity)에서 `/wjk <요청>`으로 쓰려면 설치 후 스킬을 추가합니다.
+자세한 내용은 [외부 에이전트 연동](docs/AGENT_INTEGRATION.md)을 보세요.
+
+```bash
+npx skills add magama01/webjjonku-via-agents -s wjk -g -a claude-code -a codex -a antigravity
+```
+
 ## 왜 이 도구를 쓰나요?
 
 | Guarded | Recoverable | Web-first | Cross-platform |

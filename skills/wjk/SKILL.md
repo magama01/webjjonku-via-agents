@@ -5,17 +5,29 @@ description: /wjk <요청> — 요청을 웹쫀쿠(ChatGPT 웹 Oracle) 미션으
 
 # /wjk
 
-`$ARGUMENTS`를 웹쫀쿠 미션으로 실행함. 공통 계약을 먼저 읽음:
-`${CODEX_HOME:-$HOME/.codex}/skills/webjjonku-portable/SKILL.md`
+`$ARGUMENTS`를 웹쫀쿠 미션으로 실행함.
 
 `$ARGUMENTS`가 비어 있으면 무엇을 위임할지 사용자에게 묻고 멈춤.
+
+## 전제
+
+실행기 `${CODEX_HOME:-$HOME/.codex}/bin/chatgpt_oracle_run.py`가 있어야 함. 없으면
+사용자에게 안내하고 멈춤:
+
+```bash
+git clone https://github.com/magama01/webjjonku-via-agents.git && cd webjjonku-via-agents && python3 install.py
+```
 
 ## 절차
 
 1. 미션 파일 작성: `<project-root>/.codex-tmp/web-mission.md`
    - 목표(`$ARGUMENTS`), 정확한 root, 읽기/쓰기 범위, 필요한 파일 경로, 산출물, 검증 조건만 씀.
    - 로컬 대화 전체나 파일 원문을 복사해 넣지 않음. 경로로 참조함.
-2. 세션 ID는 `$WEBJJONKU_SESSION_ID` (SessionStart 훅이 설정). 비어 있으면 사용자에게 알리고 `--session-id` 없이 단발 실행함.
+2. 세션 ID는 `$WEBJJONKU_SESSION_ID`. 비어 있으면 `--session-id` 없이 단발 실행하고, 세션당 Project 재사용을 원하면 한 번 실행하라고 안내함 (새 세션부터 적용):
+   ```bash
+   sh "$(dirname "$(readlink -f ~/.claude/skills/wjk/SKILL.md)")/setup-claude-hook.sh"
+   ```
+   Codex/agy는 각자 `CODEX_SESSION_ID` / `AGY_CONVERSATION_ID`가 있으면 자동 감지됨.
 3. dry-run 검증:
    ```bash
    python3 "${CODEX_HOME:-$HOME/.codex}"/bin/chatgpt_oracle_run.py \
