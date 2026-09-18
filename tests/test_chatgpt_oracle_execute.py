@@ -484,7 +484,7 @@ def test_dry_run_has_temp_personalized_route_and_no_writes(executor, execution_p
         project_root=root,
         mission_path=mission,
         run_root=run_root,
-        run_id="ordinary-run-0002",
+        run_id="ordinary-run-0002", model="latest", effort="pro",
         app_name="git-app",
     )
     result = executor.execute_config(config, dry_run=True)
@@ -791,7 +791,7 @@ def test_live_project_bootstrap_maps_then_executes_regular_project_chat(tmp_path
         project_root=root,
         mission_path=mission,
         run_root=run_root,
-        run_id="project-bootstrap-regular",
+        run_id="project-bootstrap-regular", model="latest", effort="pro",
     )
     project_url = "https://chatgpt.com/g/g-p-workspace123/project"
     preflight_calls = []
@@ -1039,7 +1039,7 @@ def test_capture_state_is_durable_before_owned_tab_close(executor, execution_pat
         project_root=root,
         mission_path=mission,
         run_root=run_root,
-        run_id="ordinary-run-0003",
+        run_id="ordinary-run-0003", model="latest", effort="pro",
     )
     seed_run_project(executor, config)
     state_path = run_root / config.run_id / "state.json"
@@ -1199,7 +1199,7 @@ def test_popen_failure_cleans_owned_preflight_before_submission(executor, execut
 def test_historical_run_without_preflight_keeps_exact_tab_close(executor, execution_paths):
     root, mission, run_root, session_root = execution_paths
     config = executor.make_config(
-        project_root=root, mission_path=mission, run_root=run_root, run_id="historical-run-0001"
+        project_root=root, mission_path=mission, run_root=run_root, run_id="historical-run-0001", model="latest", effort="pro"
     )
     run_dir = run_root / config.run_id
     run_dir.mkdir(parents=True)
@@ -1233,7 +1233,7 @@ def test_timeout_keeps_same_tab_and_never_resubmits(executor, execution_paths):
         project_root=root,
         mission_path=mission,
         run_root=run_root,
-        run_id="ordinary-run-0004",
+        run_id="ordinary-run-0004", model="latest", effort="pro",
     )
     launches: list[list[str]] = []
 
@@ -1272,7 +1272,7 @@ def test_reconnect_is_prompt_free_and_uses_original_slug(executor, execution_pat
         project_root=root,
         mission_path=mission,
         run_root=run_root,
-        run_id="ordinary-run-0005",
+        run_id="ordinary-run-0005", model="latest", effort="pro",
     )
 
     def initial_popen(argv, **kwargs):
@@ -1461,3 +1461,56 @@ def test_workspace_project_mapping_reuses_project_for_same_session_id(executor, 
     assert first_mapping["url"] == "https://chatgpt.com/g/g-p-session-shared/project"
     assert second_mapping["url"] == first_mapping["url"]
     assert [bootstrap is not None for _, bootstrap in calls] == [True, False, False]
+
+
+def test_default_selection_is_sol_high_and_high_aliases_extended(executor) -> None:
+    assert executor.DEFAULT_MODEL == "gpt-5.6-sol"
+    assert executor.DEFAULT_EFFORT == "extended"
+    assert executor._normalize_effort(None) == "extended"
+    assert executor._normalize_effort("high") == "extended"
+    assert executor._normalize_effort("High") == "extended"
+
+
+def _sol_native_evidence(requested: str, label: str) -> str:
+    return (
+        "[browser] Model selection evidence: requestedKey=gpt-5.6-sol; target=GPT-5.6 Sol; "
+        "resolvedLabel=GPT-5.6 Sol; status=already-selected; strategy=select; verified=yes; "
+        "source=chatgpt-model-picker; capturedAt=now\n"
+        f"[browser] Thinking effort evidence: requestedLevel={requested}; status=already-selected; "
+        f"resolvedLabel={label}; verified=yes; failClosed=no; targetModelKind=(none); "
+        "observedModelKind=thinking; source=chatgpt-thinking-picker; capturedAt=now\n"
+    )
+
+
+@pytest.mark.parametrize("label", ["High", "높음", "Extended"])
+def test_sol_extended_is_verified_by_three_tier_high_label(executor, tmp_path: Path, label: str) -> None:
+    stdout = tmp_path / "stdout.log"
+    stdout.write_text(_sol_native_evidence("extended", label), encoding="utf-8")
+    result = executor.observed_model_check(stdout, model="gpt-5.6-sol", effort="extended")
+    assert result["verified"] is True
+    assert result["source"] == "oracle-native-selection-log"
+
+
+def test_sol_extended_rejects_extra_high_and_unverified_evidence(executor, tmp_path: Path) -> None:
+    stdout = tmp_path / "stdout.log"
+    stdout.write_text(_sol_native_evidence("extra-high", "Extra High"), encoding="utf-8")
+    assert executor.observed_model_check(stdout, model="gpt-5.6-sol", effort="extended")["verified"] is False
+    stdout.write_text(
+        _sol_native_evidence("extended", "(none)").replace("verified=yes; failClosed", "verified=no; failClosed")
+        .replace("status=already-selected; resolvedLabel=(none)", "status=unverified; resolvedLabel=(none)"),
+        encoding="utf-8",
+    )
+    assert executor.observed_model_check(stdout, model="gpt-5.6-sol", effort="extended")["verified"] is False
+
+
+def test_sol_extended_fallback_log_accepts_high_but_not_extra_high(executor, tmp_path: Path) -> None:
+    stdout = tmp_path / "stdout.log"
+    model_line = (
+        "[browser] Model selection evidence: requestedKey=gpt-5.6-sol; target=GPT-5.6 Sol; "
+        "resolvedLabel=GPT-5.6 Sol; status=already-selected; strategy=select; verified=yes; "
+        "source=chatgpt-model-picker; capturedAt=now\n"
+    )
+    stdout.write_text(model_line + "[browser] Thinking time: High (already selected)\n", encoding="utf-8")
+    assert executor.observed_model_check(stdout, model="gpt-5.6-sol", effort="extended")["verified"] is True
+    stdout.write_text(model_line + "[browser] Thinking time: Extra High (already selected)\n", encoding="utf-8")
+    assert executor.observed_model_check(stdout, model="gpt-5.6-sol", effort="extended")["verified"] is False

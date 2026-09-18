@@ -80,7 +80,7 @@ def test_golden_path_smoke_passes_against_the_source_tree() -> None:
     names = [item["check"] for item in result["checks"]]
     for required in (
         "mission_contract_compiles",
-        "explicit_latest_pro_default",
+        "default_selection_is_sol_high",
         "registered_app_selected",
         "prompt_has_exact_app_and_mission",
         "dry_run_preview_ok",
