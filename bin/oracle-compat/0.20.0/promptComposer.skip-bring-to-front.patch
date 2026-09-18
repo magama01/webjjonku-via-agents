@@ -1,0 +1,17 @@
+diff --git a/dist/src/browser/actions/promptComposer.js b/dist/src/browser/actions/promptComposer.js
+index 659b4a7..027ab44 100644
+--- a/dist/src/browser/actions/promptComposer.js
++++ b/dist/src/browser/actions/promptComposer.js
+@@ -835,6 +835,12 @@ async function activatePageForTrustedInput(Page, logger) {
+     if (!Page || typeof Page.bringToFront !== "function") {
+         return;
+     }
++    // The owned window runs off-screen with focus emulation enabled and all
++    // trusted input arrives over CDP, so OS-level activation adds nothing but
++    // a multi-second focus steal from the user's active app on macOS.
++    if (process.env.ORACLE_SKIP_BRING_TO_FRONT === "1") {
++        return;
++    }
+     await Page.bringToFront().catch((error) => {
+         const message = error instanceof Error ? error.message : String(error);
+         logger?.(`[browser] Could not bring ChatGPT target to front before trusted click: ${message}`);

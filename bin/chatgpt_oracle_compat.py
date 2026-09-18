@@ -335,6 +335,13 @@ CURRENT_PATCHES = {
         "legacy_patched": ["cd3f7b5fab388e5cb0fe13ea3358c34a6aef1fdb032f4a4bd445f833f3390bf3"],
         "legacy_patch": "thinkingTime.direct-slider-account-maximum.four-five-tier.patch",
     },
+    # Page.bringToFront before trusted clicks steals macOS focus for seconds;
+    # the executor sets ORACLE_SKIP_BRING_TO_FRONT=1 for its off-screen window.
+    "dist/src/browser/actions/promptComposer.js": {
+        "patch": "promptComposer.skip-bring-to-front.patch",
+        "pristine": "455e78e3d8bc45f88bd257d0b5c473941f01bd7c0bb4d32152d203599aba65df",
+        "patched": "3cdd502d5c6babdef09023e0288818229b26617e3b69ea1d32d05c36baa83e54",
+    },
 }
 
 # WebJjonku remains a narrower archive-verified deployment profile. The normal

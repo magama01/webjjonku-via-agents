@@ -18,6 +18,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -668,6 +669,87 @@ def _wait_bounded(process: Any, remaining: float) -> int:
         )
 
 
+_FRONTMOST_SCRIPT = (
+    'tell application "System Events" to tell (first application process whose frontmost is true) to get {unix id, name}'
+)
+
+
+def _frontmost_process() -> tuple[int, str] | None:
+    try:
+        completed = subprocess.run(
+            ["osascript", "-e", _FRONTMOST_SCRIPT], capture_output=True, text=True, timeout=3, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    pid, _, name = completed.stdout.strip().partition(", ")
+    return (int(pid), name) if pid.isdigit() else None
+
+
+def _activate_process(pid: int) -> None:
+    try:
+        subprocess.run(
+            ["osascript", "-e", f'tell application "System Events" to set frontmost of (first process whose unix id is {int(pid)}) to true'],
+            capture_output=True, text=True, timeout=3, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+class _FocusGuard:
+    """Hand focus back whenever the owned off-screen browser steals it (macOS).
+
+    The browser is ours and never needs the user's focus, but Chromium and the
+    ChatGPT page activate the app at unpredictable moments (measured 1-11 s per
+    run). Polling costs one osascript per interval and restores within ~250 ms.
+    """
+
+    def __init__(
+        self,
+        owned_pid: int | None,
+        *,
+        interval: float = 0.25,
+        frontmost: Callable[[], tuple[int, str] | None] = _frontmost_process,
+        activate: Callable[[int], None] = _activate_process,
+        enabled: bool | None = None,
+    ) -> None:
+        self.owned_pid = int(owned_pid) if owned_pid else None
+        self.interval = interval
+        self._frontmost = frontmost
+        self._activate = activate
+        self.enabled = (
+            enabled if enabled is not None
+            else sys.platform == "darwin" and os.environ.get("WEBJJONKU_FOCUS_GUARD", "1") != "0"
+        )
+        self.restores = 0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _run(self) -> None:
+        previous: int | None = None
+        while not self._stop.is_set():
+            current = self._frontmost()
+            if current is not None:
+                pid, _ = current
+                if pid == self.owned_pid:
+                    if previous is not None:
+                        self._activate(previous)
+                        self.restores += 1
+                else:
+                    previous = pid
+            self._stop.wait(self.interval)
+
+    def __enter__(self) -> "_FocusGuard":
+        if self.enabled and self.owned_pid:
+            self._thread = threading.Thread(target=self._run, name="webjjonku-focus-guard", daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self.interval * 4)
+
+
 def _phase_for(state: Mapping[str, Any]) -> str:
     if state.get("status") == "captured":
         return "captured"
@@ -1310,6 +1392,10 @@ def _finalize_capture(
 
 def _child_environment() -> dict[str, str]:
     environment = dict(os.environ)
+    if sys.platform == "darwin":
+        # The owned window is off-screen; Oracle's Page.bringToFront before
+        # trusted clicks would only steal the user's focus (measured 1-5s).
+        environment.setdefault("ORACLE_SKIP_BRING_TO_FRONT", "1")
     environment.pop("CODEX_ORACLE_TEMPORARY_PERSONALIZATION", None)
     environment.pop("CODEX_ORACLE_TEMPORARY_PERSONALIZATION_HELPER", None)
     for key in (
@@ -1693,7 +1779,9 @@ def execute_config(
                               "oracle_process_pid": getattr(process, "pid", None)})
                 _stamp(state, "launched")
                 _write_json_atomic(state_path, state)
-                state["exit_code"] = _wait_bounded(process, _observation_remaining(state))
+                with _FocusGuard(preflight.get("pid")) as guard:
+                    state["exit_code"] = _wait_bounded(process, _observation_remaining(state))
+                state["focus_restores"] = guard.restores
                 _stamp(state, "exited")
         except Exception as exc:
             if preflight is not None and not launch_attempted:
@@ -1865,7 +1953,11 @@ def _reconnect_locked(
             state.update({"status": "running", "reconnect_process_pid": getattr(process, "pid", None)})
             _stamp(state, f"reconnect_{reconnects + 1}_launched")
             _write_json_atomic(state_path, state)
-            state["reconnect_exit_code"] = _wait_bounded(process, remaining)
+            preflight_meta = state.get("personalization_preflight")
+            owned_pid = preflight_meta.get("pid") if isinstance(preflight_meta, Mapping) else None
+            with _FocusGuard(owned_pid) as guard:
+                state["reconnect_exit_code"] = _wait_bounded(process, remaining)
+            state["focus_restores"] = int(state.get("focus_restores") or 0) + guard.restores
             _stamp(state, f"reconnect_{reconnects + 1}_exited")
     except Exception as exc:
         state.update({"status": "attention_required",

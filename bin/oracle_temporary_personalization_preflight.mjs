@@ -33,8 +33,25 @@ async function dependenciesFor(packageRoot, helperPath) {
     ...await moduleAt('dist/src/browser/actions/navigation.js'),
     ...await import(pathToFileURL(requireFromOracle.resolve('chrome-launcher')).href),
     ...await import(pathToFileURL(helperPath).href),
-    jsonAt, pause,
+    jsonAt, pause, frontmostApp, activateApp,
   };
+}
+
+// macOS activates a freshly launched Chrome for a moment even when its window
+// starts off-screen. Remember the user's frontmost app and hand focus back.
+const osascript = script => new Promise(resolve => {
+  childProcess.execFile('osascript', ['-e', script], { timeout: 3000 }, (error, stdout) => {
+    resolve(error ? null : String(stdout).trim());
+  });
+});
+async function frontmostApp() {
+  if (process.platform !== 'darwin') return null;
+  return osascript('tell application "System Events" to get name of first application process whose frontmost is true');
+}
+async function activateApp(name) {
+  if (process.platform !== 'darwin' || !name) return false;
+  const escaped = String(name).replace(/["\\]/g, '\\$&');
+  return (await osascript(`tell application "System Events" to set frontmost of process "${escaped}" to true`)) !== null;
 }
 
 const projectUrlPattern = /^https:\/\/chatgpt\.com\/g\/g-p-[A-Za-z0-9_-]+\/project\/?$/;
@@ -431,6 +448,7 @@ export async function startPersonalizedBrowser(options, dependencies) {
   if (profileName) flags.push(`--profile-directory=${profileName}`);
   flags.push('--hide-crash-restore-bubble');
   const launchOptions = deps.lifecycle.resolveChromeLaunchOptionsForTest(flags, true);
+  const previousFront = deps.frontmostApp ? await deps.frontmostApp() : null;
   const launcher = new deps.Launcher({
     ...launchOptions, userDataDir: profilePath, port, startingUrl: url, handleSIGINT: false,
   }, {
@@ -483,6 +501,13 @@ export async function startPersonalizedBrowser(options, dependencies) {
     }
     await Promise.all([client.Page.enable(), client.Runtime.enable()]);
     await client.Emulation?.setFocusEmulationEnabled({ enabled: true });
+    if (previousFront && previousFront !== 'Google Chrome' && deps.activateApp) {
+      const current = await deps.frontmostApp();
+      if (current && current !== previousFront) {
+        logger(`[browser] Restoring focus to ${previousFront} after owned Chrome launch`);
+        await deps.activateApp(previousFront);
+      }
+    }
     const waitForLocation = async (expected, attempts = 160) => {
       for (let attempt = 0; attempt < attempts; attempt += 1) {
         const observed = await client.Runtime.evaluate({ expression: 'location.href', returnByValue: true });
